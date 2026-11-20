@@ -767,7 +767,7 @@ SmoothReport writeSmoothStep(const std::string& path, const std::string& name, c
     const double sampled = boxVol * in / samples;
 
     SmoothReport r;
-    for (int p = patches; p < patches + 8; ++p) {
+    for (int p = patches; p <= std::max(patches + 7, 16); ++p) {
         r = SmoothReport{};
         r.patches = p;
         Builder b(lat, cells, p);

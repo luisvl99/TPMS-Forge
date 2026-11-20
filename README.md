@@ -63,7 +63,7 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 
 ## STEP options
 
-- `--patches N` is the patch grid steps per unit cell edge to start from (default 6). Each step gives about one B-spline face per wall crossing. If the result fails a check, the tool tries N+1, N+2, … (up to N+7) and prints the value it used. FRD and Fischer-Koch S sheets need 8–11.
+- `--patches N` is the patch grid steps per unit cell edge to start from (default 3). Each step gives about one B-spline face per wall crossing. If the result fails a check, the tool tries N+1, N+2, … (up to 16, or N+7 if larger) and prints the value it used. FRD and Fischer-Koch S sheets need 8–11.
 - `--tol T` is the max distance in mm between a face and the exact surface (default 0.001 × cell size).
 - `--faceted` writes the v0 STEP (one planar face per triangle) instead.
 

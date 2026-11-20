@@ -34,7 +34,7 @@ Geometry
 
 STEP (smooth B-spline faces)
   --patches N           Patch grid steps per unit cell edge to start from
-                        (default 6). The tool steps it up until the geometry
+                        (default 3). The tool steps it up until the geometry
                         is valid and within --tol.
   --tol T               Max fit error in mm (default 0.001 x cell size).
   --faceted             Write one planar face per triangle instead (v0).
@@ -66,7 +66,7 @@ struct Options {
     double cell[3] = {10, 10, 10};
     double cells[3] = {2, 2, 2};
     int res = 24;
-    int patches = 6;
+    int patches = 3;
     double tol = 0;  // 0 = 0.001 x smallest cell size
     bool faceted = false;
     double minFragment = 0.01;
