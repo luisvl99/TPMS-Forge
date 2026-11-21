@@ -135,42 +135,42 @@ python tools/check_step.py lattice.step
 Results for 2 x 2 x 2 cells at density 0.3 (sheet and network, solid and void):
 
 - With `--exact`, all 7 surface types read as valid closed solids. The volumes match the solid fraction the tool prints within 0.0003.
-- With merged faces (default), 26 of 28 cases are valid. The Neovius sheet fails: about 30 faces along the box faces get edges that OpenCASCADE splits on reading. Use `--exact` for Neovius sheets until this is fixed.
+- With merged faces (default), all 28 cases are valid too.
 
 Curved shapes at density 0.3, merged faces: a tube (radius 10 to 20 mm, 10 mm long, 1 x 6 x 1 cells; all 28 cases) and a torus shell (radius 4 to 10 mm, major radius 25 mm, 1 x 12 x 4 cells; sheet solid and network void of each type):
 
-- Everything reads as valid closed solids except the Neovius sheets, as in the box. The volumes match the solid fraction the tool prints: for the gyroid sheet tube, solid 2 817.5 mm³ + void 6 607.3 mm³ = 9 424.8 mm³ = π (20² − 10²) × 10.
+- Everything reads as valid closed solids except the Neovius sheets: some faces get edges that OpenCASCADE splits on reading. Use `--exact` for Neovius sheets on curved shapes until this is fixed. The volumes match the solid fraction the tool prints: for the gyroid sheet tube, solid 2 817.5 mm³ + void 6 607.3 mm³ = 9 424.8 mm³ = π (20² − 10²) × 10.
 - The Neovius network at this density is isolated blobs, so its void part has inner cavities. The tool drops them with a warning, as in the box.
 
 | Faces, merged (`--exact`) | tube, 1 x 6 x 1 cells | torus shell, 1 x 12 x 4 cells |
 |---|---|---|
-| gyroid sheet | 354 (1 262) | 3 302 (8 582) |
-| Schwarz P sheet | 187 (952) | 1 733 (6 880) |
-| FRD sheet | 1 631 (10 578) | 13 397 (80 868) |
+| gyroid sheet | 354 (1 262) | 3 055 (8 582) |
+| Schwarz P sheet | 174 (952) | 1 654 (6 880) |
+| FRD sheet | 1 607 (10 578) | 12 012 (80 868) |
 
-On 20 cores, the gyroid torus shell takes 2 s and the FRD sheet torus shell (80 868 patches, a 494 MB file) 48 s.
+On 20 cores, the gyroid torus shell takes 4 s (49 MB) and the FRD sheet torus shell (80 868 patches) 54 s (205 MB).
 
 | Faces, 2 x 2 x 2 cells, density 0.3 | `--exact` | merged |
 |---|---|---|
 | gyroid sheet / network | 1 518 / 756 | 378 / 180 |
-| Schwarz P sheet / network | 1 176 / 552 | 241 / 144 |
-| diamond sheet / network | 1 998 / 996 | 714 / 358 |
-| I-WP sheet / network | 4 398 / 642 | 524 / 162 |
-| FRD sheet / network | 13 632 / 2 868 | 1 894 / 1 228 |
-| Fischer-Koch S sheet / network | 2 478 / 4 932 | 2 016 / 955 |
+| Schwarz P sheet / network | 1 176 / 552 | 189 / 144 |
+| diamond sheet / network | 1 998 / 996 | 714 / 376 |
+| I-WP sheet / network | 4 398 / 642 | 485 / 162 |
+| FRD sheet / network | 13 632 / 2 868 | 1 864 / 1 228 |
+| Fischer-Koch S sheet / network | 2 478 / 4 932 | 2 016 / 984 |
 
 | Default run (gyroid sheet, 2 x 2 x 2 cells) | Faces | File | OpenCASCADE read |
 |---|---|---|---|
-| smooth STEP, merged | 373 | 10 MB | 1.2 s |
-| smooth STEP, `--exact` | 1 506 | 5 MB | 0.7 s |
+| smooth STEP, merged | 373 | 5 MB | 1.6 s |
+| smooth STEP, `--exact` | 1 506 | 5 MB | 2.0 s |
 | `--faceted --res 24` | 261 396 | 196 MB | 117 s |
 
-Merged files have fewer faces but can be larger: each merged face is a dense control net (up to 60 x 60 points) over a rectangle that includes the parts outside the face.
+Merged files have 3–8 times fewer faces and are usually smaller than `--exact` files (up to 4 times; at worst 1.2 times larger): each merged face is a control net over a rectangle that includes the parts outside the face.
 
 ## Notes for NX and simulation
 
 - Face count and file size grow with the cell count. FRD and Fischer-Koch S need finer patch grids, so they give the most faces per cell.
-- Merged faces are checked at the patch samples and cell mid points only. Between them a steep face can drift up to a few times `--tol`. Use a smaller `--tol` if that matters.
+- Merged faces are within `--tol` of the exact surface at the patch samples and cell mid points, and within 2 × `--tol` at the points halfway between them. Finer sampling finds at most about 4 × `--tol` in between. Use a smaller `--tol` or `--exact` if that matters.
 - For the faceted path, `--res` sets the grid steps per unit cell edge. Triangle count grows with `res²`. Thin sheets need a higher `res`; the density warning tells you when it is too low.
 - Units are mm.
 
@@ -188,7 +188,7 @@ Merged files have fewer faces but can be larger: each merged face is a dense con
 8. Check the result: every edge is used by exactly two faces in opposite directions, all corners converged, and the enclosed volume matches a quasi-random sample of the field within 2 % of the shape volume. If a check fails, the patch grid is too coarse for some feature, so the tool tries the next `--patches` value.
 9. Merge patches into large faces (skipped with `--exact`):
    - Group neighbor patches of one wall into regions. The tool keeps merging the pair with the narrowest combined normal cone, while all normals stay within 82° of the region's mean normal. A region is then a height field over the plane normal to that mean.
-   - Fit one bicubic B-spline height field per region by least squares (banded Cholesky), adding control points until every sample is within `tol` / 2. A small second-difference penalty fills the parts of the rectangle outside the region.
+   - Fit one bicubic B-spline height field per region by least squares (banded Cholesky) over a rectangle along the region's principal directions, with a net shaped like the rectangle. The data are points on the exact surface: the patch samples and the cell mid points projected onto the surface. Control points are added (20 % per step) until every data point is within `tol` of the fit (distance to the tangent plane, not height: on steep parts the height difference is up to 7 times larger) and the points halfway between them within 2 × `tol` of the exact surface. A small second-difference penalty fills the parts of the rectangle outside the region.
    - A region that does not fit is grouped again with a 15° smaller cone. A region fails if it folds over itself, touches itself at a vertex, or has more than one outer loop. A single patch that is too curved for a height field keeps its own surface.
    - Join the patch edges between the same two faces into one B-spline curve within `tol` / 4. Chains end at kinks sharper than 30°: one curve cannot follow a corner. Zero-length edges (two corners on one point, e.g. on a mirror plane) are collapsed.
    - The STEP uncertainty is set to `tol`, so readers accept the edge gaps.
@@ -215,7 +215,7 @@ For a tube or torus shell, the same steps run in the parameter box (one unit per
 
 - **v1 (done):** smooth STEP with B-spline faces, error checked against the exact implicit function, shared boundary curves.
 - **v1 merged faces (done):** 3–8 times fewer faces through trimmed height-field regions.
-- **Next for v1:** test import in NX; fix merged Neovius sheets; smaller merged files (adaptive knots); inner cavities (`BREP_WITH_VOIDS`).
+- **Next for v1:** test import in NX; fix merged Neovius sheets on curved shapes; inner cavities (`BREP_WITH_VOIDS`).
 - **v2 (done):** GUI with every command-line option and a live preview.
 - **Curved shapes, phase 1 (done):** tube and torus shell with cells that follow the shape; trimmed cylinder, sphere and torus; preview, STL and faceted STEP.
 - **Curved shapes, phase 2 (done):** smooth STEP for the tube and torus shell, with exact cylinder, torus and plane caps.

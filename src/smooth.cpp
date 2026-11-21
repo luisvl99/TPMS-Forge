@@ -275,6 +275,7 @@ struct Patch {
     // [i][j], i along v0 -> v1, j along v0 -> v3: samples and control points
     // in the parameter box (pts, pctrl) and in mm (mm, ctrl).
     std::vector<std::vector<Vec3>> pts, pctrl, mm, ctrl;
+    std::vector<Vec3> mids;  // the exact surface next to the spline's cell mid points, mm
 };
 
 struct Directed {
@@ -288,7 +289,7 @@ struct Face {
     int patch = -1;                          // B-spline patch
     int box = -1;                            // box face of a planar cap
     std::vector<std::vector<Vec3>> ctrl;     // trimmed B-spline of a merged region
-    std::vector<double> knots;               // its knots (both directions)
+    std::vector<double> knots[2];            // its knots along u and v
     std::vector<Loop> loops;                 // first loop is the outer one
     double volume = 0;                       // contribution to the enclosed volume
 };
@@ -517,7 +518,7 @@ public:
     }
 
     // Merge patches into large trimmed faces. Each region is a height field
-    // over a plane, so one B-spline surface holds it within tol / 2. Chains of
+    // over a plane, so one B-spline surface holds it within tol. Chains of
     // patch edges between the same two faces become one curve within tol / 4.
     // Edges are then tolerant: they lie within tol of their faces, not on
     // them. On failure nothing changes.
@@ -744,15 +745,16 @@ public:
             long surface;
             if (f.patch >= 0 || !f.ctrl.empty()) {
                 const auto& net = f.patch >= 0 ? patches_[size_t(f.patch)].ctrl : f.ctrl;
-                const auto [m, k] = knotLists(f.patch >= 0 ? spline_.knots : f.knots);
+                const auto [mu, ku] = knotLists(f.patch >= 0 ? spline_.knots : f.knots[0]);
+                const auto [mv, kv] = knotLists(f.patch >= 0 ? spline_.knots : f.knots[1]);
                 std::string rows = "(";
                 for (const auto& row : net) {
                     std::vector<long> ids;
                     for (const Vec3& c : row) ids.push_back(point(c));
                     rows += (rows.size() > 1 ? ",\n" : "") + refList(ids);
                 }
-                surface = st.add("B_SPLINE_SURFACE_WITH_KNOTS('',3,3," + rows + "),.UNSPECIFIED.,.F.,.F.,.F.," + m + "," +
-                                 m + "," + k + "," + k + ",.UNSPECIFIED.)");
+                surface = st.add("B_SPLINE_SURFACE_WITH_KNOTS('',3,3," + rows + "),.UNSPECIFIED.,.F.,.F.,.F.," + mu +
+                                 "," + mv + "," + ku + "," + kv + ",.UNSPECIFIED.)");
             } else {
                 const int a = f.box / 2, side = f.box % 2;
                 auto placement = [&](Vec3 origin, Vec3 z, Vec3 x) {
@@ -961,7 +963,8 @@ private:
 
     // One trimmed height-field B-spline for a set of patches. Fails if the
     // region touches itself at a vertex, is not a height field over its mean
-    // plane, or does not fit within tol / 2 with up to 60 x 60 control points.
+    // plane, or does not fit within tol at the data and 2 tol at check points
+    // between them, with up to about 60 x 60 control points.
     bool fitRegion(const std::vector<int>& members, double tol, Face& out, double& maxErr) const {
         const int np = int(patches_.size());
         std::vector<char> in(size_t(np), 0);
@@ -1008,27 +1011,30 @@ private:
                 if (dot(n, axis) < 0.1) return false;
         Vec3 e1 = cross(axis, std::fabs(axis.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0});
         e1 = e1 * (1.0 / norm(e1));
-        const Vec3 e2 = cross(axis, e1);
+        Vec3 e2 = cross(axis, e1);
 
-        // Data: patch samples, and the patch splines at the cell mid points.
-        // ponytail: checks the fit only there, so it can drift up to a few
-        // tol between them on steep faces; fitting to finePatch() points
-        // fixes that but costs ~20% more faces and 5x the time.
+        // Data: points on the exact surface, at the patch samples and next to
+        // the patch cell mid points. So the fit is within tol of the surface
+        // there, the same check as for a patch.
         std::vector<Vec3> data;
         for (int p : members) {
             const Patch& pa = patches_[size_t(p)];
             for (const auto& row : pa.mm) data.insert(data.end(), row.begin(), row.end());
-            for (const auto& bu : spline_.mid)
-                for (const auto& bv : spline_.mid) {
-                    Vec3 q;
-                    for (size_t k = 0; k < bu.size(); ++k)
-                        for (size_t l = 0; l < bv.size(); ++l) q = q + pa.ctrl[k][l] * (bu[k] * bv[l]);
-                    data.push_back(q);
-                }
+            data.insert(data.end(), pa.mids.begin(), pa.mids.end());
         }
         Vec3 o;
         for (const Vec3& d : data) o = o + d;
         o = o * (1.0 / double(data.size()));
+        // The rectangle follows the principal directions of the data, so it
+        // stays tight around long, thin regions; e1 the longer one.
+        double cuu = 0, cvv = 0, cuv = 0;
+        for (const Vec3& d : data) {
+            const double u = dot(d - o, e1), v = dot(d - o, e2);
+            cuu += u * u, cvv += v * v, cuv += u * v;
+        }
+        const double turn = 0.5 * std::atan2(2 * cuv, cuu - cvv);
+        e1 = e1 * std::cos(turn) + e2 * std::sin(turn);
+        e2 = cross(axis, e1);
         double u0 = 1e300, u1 = -1e300, v0 = 1e300, v1 = -1e300;
         std::vector<std::array<double, 3>> uvh;
         for (const Vec3& d : data) {
@@ -1040,13 +1046,29 @@ private:
         const double margin = 0.02 * std::max(u1 - u0, v1 - v0) + 1e-9;
         u0 -= margin, u1 += margin, v0 -= margin, v1 += margin;
         for (auto& x : uvh) x[0] = (x[0] - u0) / (u1 - u0), x[1] = (x[1] - v0) / (v1 - v0);
+        // Check points between the data: the patch splines at half steps,
+        // (s, t, wall). The fit must stay near the exact surface there too.
+        std::vector<std::array<double, 3>> checks;
+        for (int pm : members) {
+            const Patch& pa = patches_[size_t(pm)];
+            for (const auto& row : halfSteps(pa.ctrl))
+                for (const Vec3& f : row)
+                    checks.push_back({(dot(f - o, e1) - u0) / (u1 - u0), (dot(f - o, e2) - v0) / (v1 - v0), double(pa.wall)});
+        }
 
+        // A Ku x Kv net with about K^2 points, spaced alike along u and v.
         constexpr int kMax = 60;
-        for (int K = std::min(kMax, int(3 * std::sqrt(double(members.size()))) + 4);; K = std::min(kMax, K * 3 / 2)) {
-            std::vector<double> innerKnots;
-            for (int j = 1; j <= K - 4; ++j) innerKnots.push_back(double(j) / (K - 3));
-            const std::vector<double> U = clamped(innerKnots);
-            const size_t n = size_t(K) * size_t(K), w = size_t(3 * K + 3);
+        constexpr double kDrift = 2;  // between the data, the fit may be up to 2 tol off
+        const double aspect = std::sqrt(std::min(16.0, (u1 - u0) / (v1 - v0)));
+        auto uniform = [](int k) {
+            std::vector<double> inner;
+            for (int j = 1; j <= k - 4; ++j) inner.push_back(double(j) / (k - 3));
+            return clamped(inner);
+        };
+        for (int K = std::min(kMax, int(3 * std::sqrt(double(members.size()))) + 4);; K = std::min(kMax, K + K / 5 + 1)) {
+            const int Ku = std::max(4, int(K * aspect + 0.5)), Kv = std::max(4, int(K / aspect + 0.5));
+            const std::vector<double> U = uniform(Ku), V = uniform(Kv);
+            const size_t n = size_t(Ku) * size_t(Kv), w = size_t(3 * Kv + 3);
             std::vector<double> A(n * (w + 1), 0.0), h(n, 0.0);
             auto add = [&](const size_t* idx, const double* c, int cnt, double weight, double rhs) {
                 for (int i = 0; i < cnt; ++i) {
@@ -1058,10 +1080,10 @@ private:
             for (const auto& x : uvh) {
                 double Ns[4], Nt[4], c[16];
                 size_t idx[16];
-                const int is = cubicBasis(U, x[0], Ns), it = cubicBasis(U, x[1], Nt);
+                const int is = cubicBasis(U, x[0], Ns), it = cubicBasis(V, x[1], Nt);
                 for (int p = 0; p < 4; ++p)
                     for (int q = 0; q < 4; ++q) {
-                        idx[p * 4 + q] = size_t(is + p) * size_t(K) + size_t(it + q);
+                        idx[p * 4 + q] = size_t(is + p) * size_t(Kv) + size_t(it + q);
                         c[p * 4 + q] = Ns[p] * Nt[q];
                     }
                 add(idx, c, 16, 1.0, x[2]);
@@ -1069,26 +1091,41 @@ private:
             // Small second-difference penalty: fills control points that no
             // data point reaches, barely touches the rest.
             const double second[3] = {1, -2, 1};
-            for (int a = 0; a < K; ++a)
-                for (int b = 1; b + 1 < K; ++b) {
-                    size_t ia[3] = {size_t(a * K + b - 1), size_t(a * K + b), size_t(a * K + b + 1)};
-                    size_t ib[3] = {size_t((b - 1) * K + a), size_t(b * K + a), size_t((b + 1) * K + a)};
-                    add(ia, second, 3, 1e-5, 0.0);
-                    add(ib, second, 3, 1e-5, 0.0);
+            for (int a = 0; a < Ku; ++a)
+                for (int b = 0; b < Kv; ++b) {
+                    const size_t i = size_t(a * Kv + b);
+                    const size_t alongV[3] = {i - 1, i, i + 1}, alongU[3] = {i - size_t(Kv), i, i + size_t(Kv)};
+                    if (b > 0 && b + 1 < Kv) add(alongV, second, 3, 1e-5, 0.0);
+                    if (a > 0 && a + 1 < Ku) add(alongU, second, 3, 1e-5, 0.0);
                 }
             if (!bandSolve(std::move(A), n, w, h)) return false;
 
-            // Height difference at each data point. It bounds the distance to
-            // the data, so a fit cannot pass by touching another sheet.
-            double err = 0;
-            for (size_t k = 0; k < uvh.size() && err <= 0.5 * tol; ++k) {
+            // Distance of each data point from the fitted surface: the height
+            // difference over sqrt(1 + |grad h|^2), the distance to the tangent
+            // plane. It is measured to the data, so a fit cannot pass by
+            // touching another sheet. (The height difference alone overstates
+            // it up to 7 times where the face is steep, which made nets dense.)
+            auto height = [&](double s, double t) {
                 double Ns[4], Nt[4], z = 0;
-                const int is = cubicBasis(U, uvh[k][0], Ns), it = cubicBasis(U, uvh[k][1], Nt);
+                const int is = cubicBasis(U, s, Ns), it = cubicBasis(V, t, Nt);
                 for (int p = 0; p < 4; ++p)
-                    for (int q = 0; q < 4; ++q) z += Ns[p] * Nt[q] * h[size_t(is + p) * size_t(K) + size_t(it + q)];
-                err = std::max(err, std::fabs(z - uvh[k][2]));
+                    for (int q = 0; q < 4; ++q) z += Ns[p] * Nt[q] * h[size_t(is + p) * size_t(Kv) + size_t(it + q)];
+                return z;
+            };
+            const double d = 1e-5, du = 2 * d * (u1 - u0), dv = 2 * d * (v1 - v0);
+            double err = 0;
+            for (size_t k = 0; k < uvh.size() && err <= tol; ++k) {
+                const double s = uvh[k][0], t = uvh[k][1];
+                const double hu = (height(s + d, t) - height(s - d, t)) / du, hv = (height(s, t + d) - height(s, t - d)) / dv;
+                err = std::max(err, std::fabs(height(s, t) - uvh[k][2]) / std::sqrt(1 + hu * hu + hv * hv));
             }
-            if (err > 0.5 * tol) {
+            double drift = 0;
+            for (size_t k = 0; k < checks.size() && err <= tol && drift <= kDrift * tol; ++k) {
+                const double s = checks[k][0], t = checks[k][1];
+                const Vec3 r = o + e1 * (u0 + s * (u1 - u0)) + e2 * (v0 + t * (v1 - v0)) + axis * height(s, t);
+                drift = std::max(drift, distance(int(checks[k][2]), r));
+            }
+            if (err > tol || drift > kDrift * tol) {
                 if (K == kMax) return false;
                 continue;
             }
@@ -1096,15 +1133,15 @@ private:
 
             // Control points: x and y at the Greville abscissae reproduce the
             // linear map exactly, so the surface is o + u e1 + v e2 + h axis.
-            out.ctrl.assign(size_t(K), std::vector<Vec3>(size_t(K)));
-            for (int a = 0; a < K; ++a)
-                for (int b = 0; b < K; ++b) {
+            out.ctrl.assign(size_t(Ku), std::vector<Vec3>(size_t(Kv)));
+            for (int a = 0; a < Ku; ++a)
+                for (int b = 0; b < Kv; ++b) {
                     const double ga = (U[size_t(a + 1)] + U[size_t(a + 2)] + U[size_t(a + 3)]) / 3;
-                    const double gb = (U[size_t(b + 1)] + U[size_t(b + 2)] + U[size_t(b + 3)]) / 3;
+                    const double gb = (V[size_t(b + 1)] + V[size_t(b + 2)] + V[size_t(b + 3)]) / 3;
                     out.ctrl[size_t(a)][size_t(b)] = o + e1 * (u0 + ga * (u1 - u0)) + e2 * (v0 + gb * (v1 - v0)) +
-                                                     axis * h[size_t(a * K + b)];
+                                                     axis * h[size_t(a * Kv + b)];
                 }
-            out.knots = U;
+            out.knots[0] = U, out.knots[1] = V;
             break;
         }
 
@@ -1395,13 +1432,17 @@ private:
         p.ctrl = interpolate(p.mm, sp);
         p.pctrl = interpolate(p.pts, sp);
 
+        // Distance at the cell mid points. Their projections onto the exact
+        // surface are kept as data for merging.
         double err = 0;
+        p.mids.clear();
         for (size_t i = 0; i < m - 1; ++i)
             for (size_t j = 0; j < m - 1; ++j) {
                 Vec3 q;
                 for (size_t k = 0; k < m; ++k)
                     for (size_t l = 0; l < m; ++l) q = q + p.ctrl[k][l] * (sp.mid[i][k] * sp.mid[j][l]);
                 err = std::max(err, distance(p.wall, q));
+                p.mids.push_back(mm(project(p.wall, conformal_ ? shape_.unmap(q) : q, 0)));
             }
         return err;
     }
@@ -1415,6 +1456,21 @@ private:
         for (size_t i = 0; i < out.size(); ++i)
             for (size_t k = 0; k < ctrl.size(); ++k) out[i] = out[i] + ctrl[k] * spline_.fine[i][k];
         return out;
+    }
+
+    // A patch spline at half steps: the samples and the points between them.
+    std::vector<std::vector<Vec3>> halfSteps(const std::vector<std::vector<Vec3>>& ctrl) const {
+        const size_t m = ctrl.size(), f = 2 * m - 1;
+        std::vector<std::vector<double>> B(f);
+        for (size_t i = 0; i < f; ++i) B[i] = spline_.basis(double(i) / double(f - 1));
+        std::vector<std::vector<Vec3>> tmp(f, std::vector<Vec3>(m)), s(f, std::vector<Vec3>(f));
+        for (size_t i = 0; i < f; ++i)
+            for (size_t l = 0; l < m; ++l)
+                for (size_t k = 0; k < m; ++k) tmp[i][l] = tmp[i][l] + ctrl[k][l] * B[i][k];
+        for (size_t i = 0; i < f; ++i)
+            for (size_t j = 0; j < f; ++j)
+                for (size_t l = 0; l < m; ++l) s[i][j] = s[i][j] + tmp[i][l] * B[j][l];
+        return s;
     }
 
     // A patch spline at the fine parameters.
