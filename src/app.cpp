@@ -45,6 +45,12 @@ struct Settings {
     int part = 0;  // solid, void
     int thickness = 0;  // by density, by iso level
     float density = 0.2f, level = 0.5f;
+    bool graded = false;                 // thickness changes linearly along axis `grade`
+    float density1 = 0.4f, level1 = 1.0f;  // at the end of that axis
+    int grade = 0;
+    bool cellGraded = false;  // box: the cell length changes along axis `cellGrade`
+    int cellGrade = 0;
+    float cellEnd = 20;
     int shape = kBox;
     bool cubic = true;
     float cell[3] = {10, 10, 10};
@@ -85,8 +91,10 @@ bool isStl(const char* path) {
 std::vector<std::string> geometryArgs(const Settings& s) {
     std::vector<std::string> a = {"--type", surfaces()[size_t(s.type)].name, "--form", s.form ? "network" : "sheet",
                                   "--part", s.part ? "void" : "solid"};
-    if (s.thickness) a.insert(a.end(), {"--level", num(s.level)});
-    else a.insert(a.end(), {"--density", num(s.density)});
+    const char* const axes[3] = {"x", "y", "z"};
+    a.insert(a.end(), {s.thickness ? "--level" : "--density", num(s.thickness ? s.level : s.density)});
+    if (s.graded) a.push_back(num(s.thickness ? s.level1 : s.density1));
+    if (s.graded && s.grade) a.insert(a.end(), {"--grade", axes[s.grade]});
     if (s.shape != kBox) a.insert(a.end(), {"--shape", kShapeArgs[s.shape]});
     if (s.shape == kTube || s.shape == kTorusShell) a.insert(a.end(), {"--radius", num(s.r0), num(s.r1)});
     if (s.shape >= kCylinder) a.insert(a.end(), {"--radius", num(s.r1)});
@@ -96,6 +104,7 @@ std::vector<std::string> geometryArgs(const Settings& s) {
         a.push_back("--cell");
         for (int k = 0; k < (s.cubic ? 1 : 3); ++k) a.push_back(num(s.cell[k]));
     }
+    if (s.shape == kBox && s.cellGraded) a.insert(a.end(), {"--cell-grade", axes[s.cellGrade], num(s.cellEnd)});
     if (s.shape <= kTorusShell) {
         a.push_back("--cells");
         const bool same = s.cells[0] == s.cells[1] && s.cells[1] == s.cells[2];
@@ -204,7 +213,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
     };
     // A point and normal in grid space, mapped to mm.
     auto emit = [&](Vec3 q, Vec3 n) {
-        if (shape.conformal()) n = shape.gradient(q, n), q = shape.map(q);
+        if (shape.mapped()) n = shape.gradient(q, n), q = shape.map(q);
         emitMm(q, n);
     };
     // The part of a triangle where g < 0, with interpolated normals. A cut
@@ -234,24 +243,22 @@ Preview buildPreview(const std::vector<std::string>& args) {
     // A sheet's two walls can be closer than a grid step, but each wall alone
     // is smooth, so the preview has no holes at any thickness. Normals are the
     // gradient of the exported field: smooth, and pointing out of the solid.
-    std::vector<double> levels = {lat.level};
-    if (lat.form == Form::Sheet) levels.push_back(-lat.level);
-    for (double c : levels) {
-        if (!solid) color = channels && c < 0 ? kRed : kBlue;  // the wall f = c bounds the channel beyond it
-        Lattice wall = open;
-        wall.form = Form::Network, wall.part = Part::Solid, wall.level = c;
-        const Mesh m = meshField([&](double x, double y, double z) { return wall(x, y, z); }, grid);
+    const std::vector<double> sides = lat.form == Form::Sheet ? std::vector<double>{1, -1} : std::vector<double>{1};
+    for (double side : sides) {
+        if (!solid) color = channels && side < 0 ? kRed : kBlue;  // the wall f = side c bounds the channel beyond it
+        const Mesh m = meshField(
+            [&](double x, double y, double z) { return open.value(x, y, z) - side * open.levelAt(x, y, z); }, grid);
         std::vector<Vec3> normals, mm;  // per vertex: normal in grid space; position and normal in mm
         for (const Vec3& v : m.vertices) {
             normals.push_back(gradient(openField, v));
-            if (!shape.conformal()) continue;
+            if (!shape.mapped()) continue;
             mm.push_back(shape.map(v));
             mm.push_back(shape.gradient(v, normals.back()));
         }
         for (const auto& t : m.triangles) {
             const Vec3 q[3] = {m.vertices[t[0]], m.vertices[t[1]], m.vertices[t[2]]};
             if (onGridFace(q[0], q[1], q[2])) continue;
-            if (shape.conformal()) {  // map each vertex once, not once per triangle
+            if (shape.mapped()) {  // map each vertex once, not once per triangle
                 for (uint32_t v : t) emitMm(mm[2 * v], mm[2 * v + 1]);
                 continue;
             }
@@ -284,7 +291,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
                     }
         }
     } else {
-        // Cut faces on the grid faces (box faces, or the faces of a conformal
+        // Cut faces on the grid faces (box faces, or the faces of a
         // parameter box, which map to cylinders, tori and flat rings), on a 2D
         // grid 4 times finer than the walls: thin sheets give thin bands.
         for (int a = 0; a < 3; ++a)
@@ -471,6 +478,10 @@ Settings fromOptions(const Options& o) {
     s.form = o.form == Form::Network, s.part = o.part == Part::Void;
     s.thickness = o.hasLevel, s.density = float(o.density);
     if (o.hasLevel) s.level = float(o.level);
+    s.graded = o.graded, s.grade = o.grade;
+    if (o.graded) s.density1 = float(o.density1), s.level1 = float(o.level1);
+    s.cellGraded = o.shape.cellGrade >= 0;
+    if (s.cellGraded) s.cellGrade = o.shape.cellGrade, s.cellEnd = float(o.shape.cellEnd);
     for (int a = 0; a < 3; ++a) s.cell[a] = float(o.cell[a]), s.cells[a] = o.cells[a];
     s.cubic = o.cell[0] == o.cell[1] && o.cell[1] == o.cell[2];
     s.shape = int(o.shape.kind);  // the GUI list follows ShapeKind
@@ -584,13 +595,25 @@ int main(int argc, char** argv) {
         // Numbers are typed, with +/- steps; values are clamped to what tpms accepts.
         if (s.thickness == 0) ImGui::InputFloat("Solid fraction", &s.density, 0.01f, 0.05f, "%.3f");
         else ImGui::InputFloat("Iso level c", &s.level, 0.01f, 0.1f, "%.4f");
-        s.density = std::clamp(s.density, 0.01f, 0.99f);
+        ImGui::Checkbox("Graded", &s.graded);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The thickness changes linearly from the value above, at the start of an axis,\n"
+                              "to the value below, at its end (linear in the cell count).");
+        if (s.graded) {
+            if (s.thickness == 0) ImGui::InputFloat("Solid fraction at end", &s.density1, 0.01f, 0.05f, "%.3f");
+            else ImGui::InputFloat("Iso level c at end", &s.level1, 0.01f, 0.1f, "%.4f");
+            const char* axes = s.shape == kTube         ? "Radial\0Around\0Along the axis\0"
+                               : s.shape == kTorusShell ? "Radial\0Around the ring\0Around the tube\0"
+                                                        : "x\0y\0z\0";
+            ImGui::Combo("Along", &s.grade, axes);
+        }
+        s.density = std::clamp(s.density, 0.01f, 0.99f), s.density1 = std::clamp(s.density1, 0.01f, 0.99f);
 
         ImGui::SeparatorText("Shape");
         if (ImGui::Combo("Shape", &s.shape, kShapeLabels)) shapeDefaults(s);
-        const bool conformal = s.shape == kTube || s.shape == kTorusShell;
+        const bool bent = s.shape == kTube || s.shape == kTorusShell;
         if (s.shape == kTorusShell || s.shape == kTorus) ImGui::InputFloat("Ring radius (mm)", &s.major, 1, 5, "%.2f");
-        if (conformal) {
+        if (bent) {
             ImGui::InputFloat(s.shape == kTube ? "Inner radius (mm)" : "Inner tube radius", &s.r0, 1, 5, "%.2f");
             ImGui::InputFloat(s.shape == kTube ? "Outer radius (mm)" : "Outer tube radius", &s.r1, 1, 5, "%.2f");
         } else if (s.shape != kBox) {
@@ -598,9 +621,9 @@ int main(int argc, char** argv) {
         }
         if (s.shape == kTube || s.shape == kCylinder) ImGui::InputFloat("Height (mm)", &s.height, 1, 5, "%.2f");
         // Keep sizes valid: positive, inner below outer, the ring outside the tube.
-        s.r0 = std::max(0.1f, s.r0), s.r1 = std::max(conformal ? s.r0 + 0.1f : 0.1f, s.r1);
+        s.r0 = std::max(0.1f, s.r0), s.r1 = std::max(bent ? s.r0 + 0.1f : 0.1f, s.r1);
         s.height = std::max(0.1f, s.height), s.major = std::max(s.r1 + 0.1f, s.major);
-        if (conformal) {
+        if (bent) {
             ImGui::InputInt3(s.shape == kTube ? "Cells: r, around, z" : "Cells: r, ring, tube", s.cells);
             ImGui::Combo("Radial spacing", &s.radial, "Log (square cells)\0Linear (even thickness)\0");
         } else {
@@ -611,13 +634,27 @@ int main(int argc, char** argv) {
             } else {
                 ImGui::InputFloat3("Cell size (mm)", s.cell, "%.2f");
             }
-            if (s.shape == kBox) ImGui::InputInt3("Cells x y z", s.cells);
+            if (s.shape == kBox) {
+                ImGui::InputInt3("Cells x y z", s.cells);
+                ImGui::Checkbox("Graded cell size", &s.cellGraded);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Along one axis the cell length changes linearly from the cell size above\n"
+                                      "(start) to the size below (end); cells stretch along that axis.");
+                if (s.cellGraded) {
+                    ImGui::Combo("Cell axis", &s.cellGrade, "x\0y\0z\0");
+                    ImGui::InputFloat("Cell size at end (mm)", &s.cellEnd, 1, 5, "%.2f");
+                    s.cellEnd = std::max(0.1f, s.cellEnd);
+                }
+            }
         }
         for (int k = 0; k < 3; ++k) s.cells[k] = std::clamp(s.cells[k], 1, 200), s.cell[k] = std::max(0.1f, s.cell[k]);
         const float tau = 6.2831853f;
-        if (s.shape == kBox)
-            ImGui::TextDisabled("Box %g x %g x %g mm", s.cells[0] * s.cell[0], s.cells[1] * s.cell[1],
-                                s.cells[2] * s.cell[2]);
+        if (s.shape == kBox) {
+            float size[3];
+            for (int k = 0; k < 3; ++k)
+                size[k] = s.cells[k] * (s.cellGraded && k == s.cellGrade ? 0.5f * (s.cell[k] + s.cellEnd) : s.cell[k]);
+            ImGui::TextDisabled("Box %g x %g x %g mm", size[0], size[1], size[2]);
+        }
         else if (s.shape == kTube)
             ImGui::TextDisabled("Cells: %.1f mm radial, %.1f-%.1f around, %.1f axial", (s.r1 - s.r0) / s.cells[0],
                                 tau * s.r0 / s.cells[1], tau * s.r1 / s.cells[1], s.height / s.cells[2]);
@@ -660,21 +697,35 @@ int main(int argc, char** argv) {
         const std::vector<std::string> args = exportArgs(s);
         const bool exporting = exportJob.valid();
         const bool unsupported = trimmed && !isStl(s.out) && !s.faceted;
-        ImGui::BeginDisabled(exporting || !shown.error.empty() || unsupported);
-        if (ImGui::Button(exporting ? "Exporting..." : "Export", {-1, 0})) {
+        // Export and the property report run the same way: a tpms command
+        // on a worker thread, with its output in the log.
+        auto start = [&](const std::vector<std::string>& job) {
             {
                 std::lock_guard<std::mutex> lock(logMutex);
-                log = "> " + commandLine(args) + "\n";
+                log = "> " + commandLine(job) + "\n";
             }
             status.clear();
             exportStart = std::chrono::steady_clock::now();
-            exportJob = std::async(std::launch::async, [args, &log, &logMutex] {
-                return run(args, [&](const std::string& text) {
+            exportJob = std::async(std::launch::async, [job, &log, &logMutex] {
+                return run(job, [&](const std::string& text) {
                     std::lock_guard<std::mutex> lock(logMutex);
                     log += text + "\n";
                 });
             });
+        };
+        ImGui::BeginDisabled(exporting || !shown.error.empty() || unsupported);
+        if (ImGui::Button(exporting ? "Working..." : "Export", {-1, 0})) start(args);
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(exporting || !shown.error.empty());
+        if (ImGui::Button("Property report", {-1, 0})) {
+            std::vector<std::string> job = geometryArgs(s);
+            if (s.res != 24) job.insert(job.end(), {"--res", std::to_string(s.res)});
+            job.push_back("--report");
+            start(job);
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Solid and fluid volumes, wetted area, hydraulic diameters, wall thickness and\n"
+                              "which faces each piece connects, from meshes at %d steps per cell.", s.res);
         ImGui::EndDisabled();
         if (exporting)
             ImGui::Text("Working... %.0f s",

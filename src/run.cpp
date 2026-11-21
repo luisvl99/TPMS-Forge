@@ -23,9 +23,14 @@ Lattice
   --form sheet|network  sheet: |f| <= c, a wall around the surface.
                         network: f <= c, one of the two channel networks.
                         Default sheet.
-  --density R           Target solid volume fraction of one unit cell,
-                        0 < R < 1 (default 0.2).
-  --level C             Iso level c. Use instead of --density.
+  --density R [R1]      Target solid volume fraction of one unit cell,
+                        0 < R < 1 (default 0.2). With R1: graded, from R at
+                        the start of the --grade axis to R1 at its end.
+  --level C [C1]        Iso level c (or graded from C to C1). Use instead of
+                        --density.
+  --grade x|y|z         Axis of a graded --density or --level (default x).
+                        Tube, torus-shell: x radial, y around, z along the
+                        axis or around the tube. Linear in the cell count.
   --part solid|void     solid, or void = shape minus solid (fluid domain for
                         CFD). --density always means the solid fraction.
 
@@ -33,6 +38,8 @@ Shape (default box)
   --shape NAME          box | tube | torus-shell   (cells follow the shape)
                         cylinder | sphere | torus  (straight cells, trimmed)
   --cell L [Ly Lz]      Unit cell size in mm (box and trimmed; default 10).
+  --cell-grade x|y|z L1 box: the cell length along that axis changes
+                        linearly from --cell (start) to L1 mm (end).
   --cells N [Ny Nz]     Cell counts (default 2).
                           box: along x, y, z
                           tube: radial, around, along the axis
@@ -66,7 +73,11 @@ Both
                         (default 0.01). Use 0 to keep all pieces.
 
 Output
-  -o, --out FILE        .step / .stp or .stl (binary). Repeat for several files.
+  -o, --out FILE        .step / .stp, .stl (binary), or .json (the property
+                        report). Repeat for several files.
+  --report              Print the property report: solid and fluid volumes,
+                        wetted area, hydraulic diameters, wall thickness,
+                        and which faces of the shape each piece touches.
   --list                List surface types.
   -h, --help            Show this help.
 
@@ -82,10 +93,10 @@ const ShapeName kShapes[] = {{"box", ShapeKind::Box},           {"tube", ShapeKi
                              {"torus-shell", ShapeKind::TorusShell}, {"cylinder", ShapeKind::Cylinder},
                              {"sphere", ShapeKind::Sphere},     {"torus", ShapeKind::Torus}};
 
-const char* shapeName(ShapeKind k) {
-    for (const auto& s : kShapes)
-        if (s.kind == k) return s.name;
-    return "?";
+// x, y or z as 0, 1, 2; -1 otherwise.
+int axisOf(const std::string& s) {
+    const std::string a = s;
+    return a == "x" ? 0 : a == "y" ? 1 : a == "z" ? 2 : -1;
 }
 
 bool number(const std::string& s, double& out) {
@@ -119,6 +130,12 @@ void say(const Print& print, const char* fmt, ...) {
 
 }  // namespace
 
+const char* shapeName(ShapeKind k) {
+    for (const auto& s : kShapes)
+        if (s.kind == k) return s.name;
+    return "?";
+}
+
 bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& error) {
     double cells[3] = {double(o.cells[0]), double(o.cells[1]), double(o.cells[2])};
     bool cellGiven = false, cellsGiven = false;
@@ -140,13 +157,22 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
             if (p == "solid") o.part = Part::Solid;
             else if (p == "void" || p == "fluid") o.part = Part::Void;
             else return error = "--part must be solid or void", false;
-        } else if (a == "--density" && hasValue && number(args[i + 1], v)) {
-            o.density = v;
-            ++i;
-        } else if (a == "--level" && hasValue && number(args[i + 1], v)) {
-            o.level = v;
-            o.hasLevel = true;
-            ++i;
+        } else if (a == "--density" || a == "--level") {
+            n = numbers(args, i, r, 2);
+            if (n == 0) return error = a + " needs 1 or 2 numbers", false;
+            const bool isLevel = a == "--level";
+            (isLevel ? o.level : o.density) = r[0];
+            (isLevel ? o.level1 : o.density1) = r[n - 1];
+            o.hasLevel |= isLevel;
+            o.graded = n == 2;
+        } else if (a == "--grade" && hasValue) {
+            if ((o.grade = axisOf(lower(args[++i]))) < 0) return error = "--grade must be x, y or z", false;
+        } else if (a == "--cell-grade" && i + 2 < args.size() && number(args[i + 2], v)) {
+            if ((o.shape.cellGrade = axisOf(lower(args[i + 1]))) < 0) return error = "--cell-grade needs x, y or z", false;
+            o.shape.cellEnd = v;
+            i += 2;
+        } else if (a == "--report") {
+            o.report = true;
         } else if (a == "--shape" && hasValue) {
             const std::string k = lower(args[++i]);
             const auto it = std::find_if(std::begin(kShapes), std::end(kShapes), [&](const ShapeName& s) { return k == s.name; });
@@ -200,16 +226,21 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
     }
 
     if (!findSurface(o.type)) return error = "unknown surface type '" + o.type + "'. Run 'tpms --list'.", false;
-    if (!o.hasLevel && !(o.density > 0 && o.density < 1)) return error = "--density must be in (0, 1)", false;
-    if (o.hasLevel && o.form == Form::Sheet && o.level <= 0) return error = "sheet needs --level > 0", false;
+    if (!o.graded) o.density1 = o.density, o.level1 = o.level;
+    if (!o.hasLevel && !(o.density > 0 && o.density < 1 && o.density1 > 0 && o.density1 < 1))
+        return error = "--density must be in (0, 1)", false;
+    if (o.hasLevel && o.form == Form::Sheet && !(o.level > 0 && o.level1 > 0))
+        return error = "sheet needs --level > 0", false;
 
     Shape& s = o.shape;
     const std::string name = shapeName(s.kind);
-    if (s.conformal() && cellGiven) return error = "--cell does not apply to --shape " + name + ": set --cells", false;
+    if (s.bent() && cellGiven) return error = "--cell does not apply to --shape " + name + ": set --cells", false;
+    if (s.cellGrade >= 0 && s.kind != ShapeKind::Box) return error = "--cell-grade works for the box only", false;
+    if (s.cellGrade >= 0 && !(s.cellEnd > 0)) return error = "--cell-grade needs a cell length > 0", false;
     if (s.trimmed() && cellsGiven) return error = "--cells does not apply to --shape " + name + ": set --cell", false;
     if (s.kind == ShapeKind::Box && (radii || s.height || s.major))
         return error = "--radius, --height and --major need a --shape", false;
-    const bool shell = s.conformal(), needsHeight = s.kind == ShapeKind::Tube || s.kind == ShapeKind::Cylinder;
+    const bool shell = s.bent(), needsHeight = s.kind == ShapeKind::Tube || s.kind == ShapeKind::Cylinder;
     const bool needsMajor = s.kind == ShapeKind::TorusShell || s.kind == ShapeKind::Torus;
     if (s.kind != ShapeKind::Box) {
         if (shell && !(radii == 2 && s.r0 > 0 && s.r1 > s.r0))
@@ -225,6 +256,7 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
         if (cells[a] < 1 || cells[a] != std::floor(cells[a])) return error = "--cells must be whole numbers >= 1", false;
         o.cells[a] = int(cells[a]);
         s.cells[a] = cells[a];
+        s.cellSize[a] = o.cell[a];
     }
     if (o.res < 4) return error = "--res must be >= 4", false;
     if (o.patches < 2) return error = "--patches must be >= 2", false;
@@ -232,9 +264,9 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
     if (o.tol == 0) o.tol = autoTol(o);
     for (const auto& out : o.outputs) {
         const std::string e = ext(out);
-        if (e != ".step" && e != ".stp" && e != ".stl")
-            return error = "output '" + out + "' must end in .step, .stp or .stl", false;
-        if (e != ".stl" && !o.faceted && s.trimmed())
+        if (e != ".step" && e != ".stp" && e != ".stl" && e != ".json")
+            return error = "output '" + out + "' must end in .step, .stp, .stl or .json", false;
+        if ((e == ".step" || e == ".stp") && !o.faceted && s.trimmed())
             return error = std::string("smooth STEP does not support --shape ") + shapeName(s.kind) +
                            " yet: write .stl or add --faceted", false;
     }
@@ -242,7 +274,7 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
 }
 
 double autoTol(const Options& o) {
-    return 0.001 * (o.shape.conformal() ? o.shape.minCell() : std::min({o.cell[0], o.cell[1], o.cell[2]}));
+    return 0.001 * (o.shape.mapped() ? o.shape.minCell() : std::min({o.cell[0], o.cell[1], o.cell[2]}));
 }
 
 Lattice makeLattice(const Options& o) {
@@ -252,8 +284,21 @@ Lattice makeLattice(const Options& o) {
     lat.form = o.form;
     lat.part = o.part;
     lat.shape = o.shape;
-    for (int a = 0; a < 3; ++a) lat.cell[a] = o.shape.conformal() ? 1 : o.cell[a];
-    lat.level = o.hasLevel ? o.level : levelForDensity(surface->f, o.form, o.density);
+    for (int a = 0; a < 3; ++a) lat.cell[a] = o.shape.mapped() ? 1 : o.cell[a];
+    // Iso level at t = 0 (start of a grading) to 1 (end): linear in the
+    // density (through the cell's quantiles), or in the level itself.
+    const std::vector<double> values = o.hasLevel ? std::vector<double>{} : cellValues(surface->f, o.form);
+    auto levelAt = [&](double t) {
+        if (o.hasLevel) return o.level + (o.level1 - o.level) * t;
+        return levelForDensity(values, o.density + (o.density1 - o.density) * t);
+    };
+    lat.level = levelAt(0);
+    if (o.graded) {
+        const int a = lat.grade = o.grade;
+        if (o.shape.trimmed()) lat.gradeFrom = -o.shape.half()[a], lat.gradeTo = o.shape.half()[a];
+        else lat.gradeFrom = 0, lat.gradeTo = gridOf(o, 1).size[a];  // mm, or cells in a parameter box
+        for (int k = 0; k <= 64; ++k) lat.levels.push_back(levelAt(k / 64.0));
+    }
     return lat;
 }
 
@@ -268,7 +313,7 @@ Grid gridOf(const Options& o, int res) {
             g.origin[a] = -0.5 * g.size[a];
         } else {
             g.steps[a] = o.cells[a] * res;
-            g.size[a] = s.conformal() ? o.cells[a] : o.cells[a] * o.cell[a];
+            g.size[a] = s.mapped() ? o.cells[a] : o.cells[a] * o.cell[a];
         }
     }
     g.periodic = s.periodic();
@@ -277,19 +322,16 @@ Grid gridOf(const Options& o, int res) {
 
 Mesh meshSolid(const Options& o, const Lattice& lat, int res, size_t* droppedDegenerate) {
     Mesh m = meshField([&](double x, double y, double z) { return lat(x, y, z); }, gridOf(o, res), droppedDegenerate);
-    if (o.shape.conformal())
+    if (o.shape.mapped())
         for (Vec3& v : m.vertices) v = o.shape.map(v);
     return m;
 }
 
-double shapeVolume(const Options& o) {
-    if (o.shape.kind != ShapeKind::Box) return o.shape.volume();
-    return o.cells[0] * o.cell[0] * o.cells[1] * o.cell[1] * o.cells[2] * o.cell[2];
-}
+double shapeVolume(const Options& o) { return o.shape.volume(); }
 
 double sampledFraction(const Options& o, const Lattice& lat) {
     // Quasi-random R3 points: a regular grid can line up with the lattice.
-    // Conformal points are weighted by the volume the mapping gives them.
+    // Points in a parameter box are weighted by the volume the mapping gives them.
     const Grid g = gridOf(o, 1);
     const double phi = 1.2207440846057595, step[3] = {1 / phi, 1 / (phi * phi), 1 / (phi * phi * phi)};
     double in = 0, all = 0;
@@ -297,7 +339,7 @@ double sampledFraction(const Options& o, const Lattice& lat) {
         Vec3 p;
         for (int a = 0; a < 3; ++a) p[a] = g.origin[a] + std::fmod(0.5 + k * step[a], 1.0) * g.size[a];
         double w = 1;
-        if (o.shape.conformal()) {
+        if (o.shape.mapped()) {
             Vec3 J[3];
             o.shape.jacobian(p, J);
             w = dot(J[0], cross(J[1], J[2]));
@@ -349,16 +391,19 @@ int run(const std::vector<std::string>& args, const Print& print) {
     Options o;
     std::string error;
     if (!parseArgs(args, o, error)) return print("error: " + error), 2;
-    if (o.outputs.empty()) return print("error: no output file. Add -o lattice.step"), 2;
-    bool needMesh = false;
-    for (const auto& out : o.outputs) needMesh |= ext(out) == ".stl" || o.faceted;
+    if (o.outputs.empty() && !o.report) return print("error: no output file. Add -o lattice.step (or --report)"), 2;
+    bool needMesh = false, needReport = o.report;
+    for (const auto& out : o.outputs) {
+        needMesh |= ext(out) == ".stl" || (o.faceted && ext(out) != ".json");
+        needReport |= ext(out) == ".json";
+    }
 
     const Lattice lat = makeLattice(o);
     const int* cells = o.cells;
     const Shape& s = o.shape;
     const double shapeVol = shapeVolume(o);
     auto solidFraction = [&](double exported) { return o.part == Part::Solid ? exported : 1.0 - exported; };
-    // What the field gives, from samples. Bending a conformal lattice moves
+    // What the field gives, from samples. Bending or grading a lattice moves
     // it away from --density, so compare meshes with this, not the target.
     const double expected = sampledFraction(o, lat);
     auto checkFraction = [&](double vol, const char* fix) {
@@ -380,12 +425,23 @@ int run(const std::vector<std::string>& args, const Print& print) {
 
     say(print, "Surface   : %s, %s, %s part", findSurface(o.type)->name.c_str(),
         o.form == Form::Sheet ? "sheet" : "network", o.part == Part::Solid ? "solid" : "void");
-    if (o.hasLevel) say(print, "Level c   : %.5g", lat.level);
-    else say(print, "Level c   : %.5g (from target solid fraction %.3f)", lat.level, o.density);
+    const char* const kAxes = "xyz";
+    if (o.graded && o.hasLevel)
+        say(print, "Level c   : %.5g to %.5g along %c", lat.levels.front(), lat.levels.back(), kAxes[o.grade]);
+    else if (o.graded)
+        say(print, "Level c   : %.5g to %.5g along %c (from target solid fraction %.3f to %.3f)", lat.levels.front(),
+            lat.levels.back(), kAxes[o.grade], o.density, o.density1);
+    else if (o.hasLevel)
+        say(print, "Level c   : %.5g", lat.level);
+    else
+        say(print, "Level c   : %.5g (from target solid fraction %.3f)", lat.level, o.density);
     switch (s.kind) {
     case ShapeKind::Box:
-        say(print, "Box       : %g x %g x %g mm (%d x %d x %d cells of %g x %g x %g mm)", cells[0] * o.cell[0],
-            cells[1] * o.cell[1], cells[2] * o.cell[2], cells[0], cells[1], cells[2], o.cell[0], o.cell[1], o.cell[2]);
+        say(print, "Box       : %g x %g x %g mm (%d x %d x %d cells of %g x %g x %g mm)", s.boxPos(0, cells[0]),
+            s.boxPos(1, cells[1]), s.boxPos(2, cells[2]), cells[0], cells[1], cells[2], o.cell[0], o.cell[1], o.cell[2]);
+        if (s.cellGrade >= 0)
+            say(print, "Cell size : along %c from %g to %g mm (graded)", kAxes[s.cellGrade], o.cell[s.cellGrade],
+                s.cellEnd);
         break;
     case ShapeKind::Tube:
     case ShapeKind::TorusShell:
@@ -403,7 +459,9 @@ int run(const std::vector<std::string>& args, const Print& print) {
             extra, o.cell[0], o.cell[1], o.cell[2]);
     }
     }
-    if (std::fabs(solidFraction(expected) - o.density) > 0.01 && !o.hasLevel)
+    if (o.graded)
+        say(print, "note: the field gives an overall solid fraction of %.4f.", solidFraction(expected));
+    else if (std::fabs(solidFraction(expected) - o.density) > 0.01 && !o.hasLevel)
         say(print, "note: the field gives solid fraction %.4f here, not %.3f: the shape bends or cuts the cells.",
             solidFraction(expected), o.density);
 
@@ -431,6 +489,7 @@ int run(const std::vector<std::string>& args, const Print& print) {
 
     for (const auto& out : o.outputs) {
         const std::filesystem::path p(out);
+        if (ext(out) == ".json") continue;  // the report, below
         if (ext(out) == ".stl" || o.faceted) {
             const bool written =
                 ext(out) == ".stl" ? writeStl(out, mesh.kept) : writeStep(out, mesh.kept, p.stem().string());
@@ -460,6 +519,15 @@ int run(const std::vector<std::string>& args, const Print& print) {
         dropped(r.fragments, r.cavities);
         checkFraction(r.volume, "Raise --patches.");
         wrote(out);
+    }
+    if (needReport) {
+        const Report rep = makeReport(o, lat, o.res);
+        if (o.report) printReport(rep, o, print);
+        for (const auto& out : o.outputs) {
+            if (ext(out) != ".json") continue;
+            if (writeReportJson(out, rep, o, lat)) wrote(out);
+            else say(print, "error: cannot write '%s'", out.c_str()), ok = false;
+        }
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     say(print, "Time      : %.2f s", secs);

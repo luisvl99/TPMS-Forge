@@ -297,7 +297,7 @@ struct Face {
 class Builder {
 public:
     Builder(const Lattice& lat, const int cells[3], int res, double tol)
-        : lat_(lat), shape_(lat.shape), conformal_(lat.shape.conformal()), periodic_(lat.shape.periodic()),
+        : lat_(lat), shape_(lat.shape), mapped_(lat.shape.mapped()), periodic_(lat.shape.periodic()),
           tol_(tol) {
         for (int a = 0; a < 3; ++a) {
             N_[a] = cells[a] * res;
@@ -307,10 +307,11 @@ public:
         hmin_ = std::min({H_[0], H_[1], H_[2]});
         sx_ = N_[0] + 1;
         sxy_ = int64_t(sx_) * (N_[1] + 1);
-        // phi = sign * (f - level) equals the lattice field near each wall.
+        // phi = sign * (f - level) equals the lattice field near each wall:
+        // f = c, and for a sheet f = -c.
         const double s = lat.part == Part::Solid ? 1.0 : -1.0;
-        walls_.push_back({lat.level, s});
-        if (lat.form == Form::Sheet) walls_.push_back({-lat.level, -s});
+        walls_.push_back({1, s});
+        if (lat.form == Form::Sheet) walls_.push_back({-1, -s});
         // The far face of a periodic axis copies the near one, so both get
         // the same patches and their vertices can be welded.
         for (size_t w = 0; w < walls_.size(); ++w) {
@@ -767,12 +768,12 @@ public:
                     surface = shape_.kind == ShapeKind::Tube
                                   ? st.add("CYLINDRICAL_SURFACE(''," + ax + "," + r + ")")
                                   : st.add("TOROIDAL_SURFACE(''," + ax + "," + real(shape_.major) + "," + r + ")");
-                } else {  // plane, normal out of the solid
-                    Vec3 origin, nrm, x;
-                    nrm[a] = side ? 1.0 : -1.0;  // tube ends: parameter z is z in mm
-                    if (conformal_) origin.z = (side ? 0.5 : -0.5) * shape_.height, x.x = 1;
-                    else origin[a] = side ? L_[a] : 0.0, x[side ? (a + 1) % 3 : (a + 2) % 3] = 1;
-                    surface = st.add("PLANE(''," + placement(origin, nrm, x) + ")");
+                } else {  // plane through a corner of the face, normal out of the solid
+                    Vec3 corner, nrm, x;  // flat caps lie across a parameter axis that maps to the same mm axis
+                    corner[a] = side ? L_[a] : 0.0;
+                    nrm[a] = side ? 1.0 : -1.0;
+                    x[side ? (a + 1) % 3 : (a + 2) % 3] = 1;
+                    surface = st.add("PLANE(''," + placement(mm(corner), nrm, x) + ")");
                 }
             }
             surfaceId.emplace(fi, surface);
@@ -826,12 +827,12 @@ public:
 
 private:
     struct Wall {
-        double level, sign;  // phi = sign * (f - level), inside where phi < 0
+        double levelSign, sign;  // phi = sign * (f - levelSign c), inside where phi < 0
     };
 
     const Lattice& lat_;
     const Shape& shape_;
-    const bool conformal_;
+    const bool mapped_;  // built in a parameter box (see Shape)
     const int periodic_;  // bit per parameter axis that wraps around
     const double tol_;
     int N_[3];
@@ -874,7 +875,7 @@ private:
         return key;
     }
 
-    Vec3 mm(Vec3 p) const { return conformal_ ? shape_.map(p) : p; }
+    Vec3 mm(Vec3 p) const { return mapped_ ? shape_.map(p) : p; }
     std::vector<Vec3> mapped(std::vector<Vec3> ps) const {
         for (Vec3& p : ps) p = mm(p);
         return ps;
@@ -882,19 +883,19 @@ private:
 
     // Distance estimate of a point in mm from wall w: |phi| / |grad phi|.
     double distance(int w, Vec3 q) const {
-        const Vec3 p = conformal_ ? shape_.unmap(q) : q, g = grad(w, p);
-        return std::fabs(phi(w, p)) / norm(conformal_ ? shape_.gradient(p, g) : g);
+        const Vec3 p = mapped_ ? shape_.unmap(q) : q, g = grad(w, p);
+        return std::fabs(phi(w, p)) / norm(mapped_ ? shape_.gradient(p, g) : g);
     }
 
     // Unit normal in mm, out of the solid, at a point of wall w.
     Vec3 normal(int w, Vec3 p) const {
         Vec3 g = grad(w, p);
-        if (conformal_) g = shape_.gradient(p, g);
+        if (mapped_) g = shape_.gradient(p, g);
         return g * (1.0 / norm(g));
     }
 
     // Box face F is capped by a plane (else a cylinder or torus around z).
-    bool flatCap(int F) const { return !conformal_ || (shape_.kind == ShapeKind::Tube && F / 2 == 2); }
+    bool flatCap(int F) const { return shape_.kind == ShapeKind::Box || (shape_.kind == ShapeKind::Tube && F / 2 == 2); }
 
     // Agglomerative clustering of adjacent patches: merge the neighbor pair
     // whose union has the narrowest normal cone, while every normal stays
@@ -1180,7 +1181,8 @@ private:
     Vec3 nodePos(const int i[3]) const { return {i[0] * H_[0], i[1] * H_[1], i[2] * H_[2]}; }
 
     double phi(int w, Vec3 p) const {
-        return walls_[size_t(w)].sign * (lat_.value(p.x, p.y, p.z) - walls_[size_t(w)].level);
+        const Wall& W = walls_[size_t(w)];
+        return W.sign * (lat_.value(p.x, p.y, p.z) - W.levelSign * lat_.levelAt(p.x, p.y, p.z));
     }
 
     Vec3 grad(int w, Vec3 p) const {
@@ -1360,7 +1362,7 @@ private:
     // or on a curved shape a curve through 32 samples per cell.
     void sampleLine(Edge& e) const {
         const Vec3 A = verts_[size_t(e.a)].p, B = verts_[size_t(e.b)].p;
-        const int k = conformal_ ? std::max(8, int(32 * norm(B - A))) : 1;
+        const int k = shape_.bent() ? std::max(8, int(32 * norm(B - A))) : 1;
         e.pts.clear();
         for (int i = 0; i <= k; ++i) e.pts.push_back(A + (B - A) * (double(i) / k));
         e.mm = mapped(e.pts);
@@ -1442,7 +1444,7 @@ private:
                 for (size_t k = 0; k < m; ++k)
                     for (size_t l = 0; l < m; ++l) q = q + p.ctrl[k][l] * (sp.mid[i][k] * sp.mid[j][l]);
                 err = std::max(err, distance(p.wall, q));
-                p.mids.push_back(mm(project(p.wall, conformal_ ? shape_.unmap(q) : q, 0)));
+                p.mids.push_back(mm(project(p.wall, mapped_ ? shape_.unmap(q) : q, 0)));
             }
         return err;
     }
@@ -1506,7 +1508,8 @@ private:
     // Volume term of a cap polygon (s, t) on box face F: the flux of
     // (Phi, 0, 0) through it. Only the face p.x = L_x has any: Phi = 0 at
     // p.x = 0, and the other faces are parallel to the flux. By Green, the
-    // integral of Phi over the polygon is the loop integral of s Phi dt.
+    // integral of Phi over the polygon is the loop integral of Psi dt
+    // (Shape::fluxArea), with (s, t) = (p.y, p.z).
     double capVolume(int F, const std::vector<std::array<double, 2>>& poly) const {
         if (F != 1) return 0;
         double v = 0;
@@ -1514,7 +1517,7 @@ private:
             const auto& A = poly[q];
             const auto& B = poly[(q + 1) % poly.size()];
             const double s = 0.5 * (A[0] + B[0]), t = 0.5 * (A[1] + B[1]);
-            v += s * shape_.flux({L_[0], s, t}) * (B[1] - A[1]);
+            v += shape_.fluxArea({L_[0], s, t}) * (B[1] - A[1]);
         }
         return v;
     }
@@ -1702,7 +1705,7 @@ SmoothReport writeSmoothStep(const std::string& path, const std::string& name, c
         r.solids = kept.size();
         // Tolerant edges: merged faces, and edges on curved caps (fitted
         // curves on a cylinder or torus, within tol / 4).
-        const double uncertainty = r.merged || lat.shape.conformal() ? tol : 1e-7;
+        const double uncertainty = r.merged || lat.shape.bent() ? tol : 1e-7;
         if (kept.empty()) r.error = "nothing to export";
         else if (!writeStepFile(path, name, [&](StepFile& st) { return b.write(st, kept); }, uncertainty))
             r.error = "cannot write '" + path + "'";

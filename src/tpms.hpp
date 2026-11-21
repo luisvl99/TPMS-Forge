@@ -106,11 +106,14 @@ inline double norm(Vec3 a) { return std::sqrt(dot(a, a)); }
 
 // The outer shape of the part.
 // - Box: the lattice fills [0, cells x cell].
-// - Tube, torus shell (conformal): the lattice is built in a parameter box,
-//   one unit per cell, and bent into the shape, so cells follow the
-//   curvature. Parameter axes: tube = radial, around, along the axis;
-//   torus shell = radial, around the ring, around the tube.
+// - Tube, torus shell: the lattice is built in a parameter box, one unit per
+//   cell, and bent into the shape, so cells follow the curvature. Parameter
+//   axes: tube = radial, around, along the axis; torus shell = radial,
+//   around the ring, around the tube.
+// - Box with a graded cell size: also built in a parameter box, and
+//   stretched along one axis, where the cell length changes linearly.
 // - Cylinder, sphere, torus (trimmed): a straight lattice cut by the shape.
+// "Mapped" shapes are the ones built in a parameter box.
 // Round shapes are centered at the origin, axis along z.
 enum class ShapeKind { Box, Tube, TorusShell, Cylinder, Sphere, Torus };
 
@@ -119,10 +122,14 @@ struct Shape {
     double r0 = 0, r1 = 0;        // tube, torus shell: inner and outer radius; trimmed: r1 = (tube) radius
     double height = 0;            // tube, cylinder
     double major = 0;             // torus shell, torus: from the axis to the tube center
-    bool logRadial = true;        // conformal: r = r0 (r1 / r0)^t keeps cells square; false: linear in r
-    double cells[3] = {1, 1, 1};  // conformal: cells along the parameter axes
+    bool logRadial = true;        // tube, torus shell: r = r0 (r1 / r0)^t keeps cells square; false: linear in r
+    double cells[3] = {1, 1, 1};  // cells along the (parameter) axes
+    double cellSize[3] = {10, 10, 10};  // box: cell size per axis, mm
+    int cellGrade = -1;                 // box: the axis whose cell length changes, -1: none
+    double cellEnd = 0;                 // box: the cell length at the far end of that axis
 
-    bool conformal() const { return kind == ShapeKind::Tube || kind == ShapeKind::TorusShell; }
+    bool bent() const { return kind == ShapeKind::Tube || kind == ShapeKind::TorusShell; }
+    bool mapped() const { return bent() || (kind == ShapeKind::Box && cellGrade >= 0); }
     bool trimmed() const {
         return kind == ShapeKind::Cylinder || kind == ShapeKind::Sphere || kind == ShapeKind::Torus;
     }
@@ -130,22 +137,41 @@ struct Shape {
         return kind == ShapeKind::Tube ? 2 : kind == ShapeKind::TorusShell ? 6 : 0;
     }
 
-    // Conformal: radius in mm at radial parameter u (cell units).
+    // Box: position in mm along axis a at parameter u (cell units), and the
+    // local cell length (its derivative), which grows linearly on cellGrade.
+    double boxPos(int a, double u) const {
+        const double k = a == cellGrade ? (cellEnd - cellSize[a]) / cells[a] : 0;
+        return (cellSize[a] + 0.5 * k * u) * u;
+    }
+    double boxCell(int a, double u) const {
+        return a == cellGrade ? cellSize[a] + (cellEnd - cellSize[a]) / cells[a] * u : cellSize[a];
+    }
+
+    // Tube, torus shell: radius in mm at radial parameter u (cell units).
     double radius(double u) const {
         const double t = u / cells[0];
         return logRadial ? r0 * std::pow(r1 / r0, t) : r0 + (r1 - r0) * t;
     }
 
-    // Conformal: parameter point (cell units) to mm. Orientation preserving.
+    // Mapped: parameter point (cell units) to mm. Orientation preserving.
     Vec3 map(Vec3 p) const {
+        if (kind == ShapeKind::Box) return {boxPos(0, p.x), boxPos(1, p.y), boxPos(2, p.z)};
         const double r = radius(p.x), a = kTwoPi * p.y / cells[1];
         if (kind == ShapeKind::Tube) return {r * std::cos(a), r * std::sin(a), height * (p.z / cells[2] - 0.5)};
         const double b = kTwoPi * p.z / cells[2], d = major + r * std::cos(b);
         return {d * std::cos(a), d * std::sin(a), r * std::sin(b)};
     }
 
-    // Conformal: inverse of map(). Angles come back in [0, 2 pi).
+    // Mapped: inverse of map(). Angles come back in [0, 2 pi).
     Vec3 unmap(Vec3 q) const {
+        if (kind == ShapeKind::Box) {  // the root of boxPos(a, u) = q[a], in a form stable for k = 0
+            Vec3 p;
+            for (int a = 0; a < 3; ++a) {
+                const double c = cellSize[a], k = a == cellGrade ? (cellEnd - c) / cells[a] : 0;
+                p[a] = 2 * q[a] / (c + std::sqrt(std::max(0.0, c * c + 2 * k * q[a])));
+            }
+            return p;
+        }
         auto turn = [](double angle) { return (angle < 0 ? angle + kTwoPi : angle) / kTwoPi; };
         double r;
         Vec3 p;
@@ -164,10 +190,10 @@ struct Shape {
 
     // Phi(p) with dPhi/dp.x = det J and Phi = 0 at p.x = 0. The flux
     // (Phi, 0, 0) has divergence det J, so a closed surface in the parameter
-    // box encloses the mm volume of the flux through it. Box: the parameter
-    // box is the part in mm, Phi = p.x.
+    // box encloses the mm volume of the flux through it. Box (not mapped):
+    // the parameter box is the part in mm, Phi = p.x.
     double flux(Vec3 p) const {
-        if (!conformal()) return p.x;
+        if (kind == ShapeKind::Box) return mapped() ? boxPos(0, p.x) * boxCell(1, p.y) * boxCell(2, p.z) : p.x;
         const double pi = 0.5 * kTwoPi, r = radius(p.x);
         if (kind == ShapeKind::Tube) return pi * height / (cells[1] * cells[2]) * (r * r - r0 * r0);
         const double b = kTwoPi * p.z / cells[2];
@@ -175,16 +201,33 @@ struct Shape {
                (major * (r * r - r0 * r0) / 2 + std::cos(b) * (r * r * r - r0 * r0 * r0) / 3);
     }
 
-    // Conformal: the smallest cell edge in mm (radial at r0; around at r0
-    // for the tube and the torus shell's tube, at major - r1 for its ring).
+    // Psi(p): Phi integrated over p.y from 0, for the flux through caps
+    // (Green's theorem). Phi does not depend on p.y except on a graded box.
+    double fluxArea(Vec3 p) const {
+        if (kind == ShapeKind::Box && mapped()) return boxPos(0, p.x) * boxPos(1, p.y) * boxCell(2, p.z);
+        return p.y * flux(p);
+    }
+
+    // Mapped: the smallest cell edge in mm (tube and torus shell: radial at
+    // r0; around at r0 for the tube and the torus shell's tube, at
+    // major - r1 for its ring).
     double minCell() const {
+        if (kind == ShapeKind::Box) {
+            double m = 1e300;
+            for (int a = 0; a < 3; ++a) m = std::min({m, cellSize[a], a == cellGrade ? cellEnd : 1e300});
+            return m;
+        }
         const double radial = radius(1) - r0;
         if (kind == ShapeKind::Tube) return std::min({radial, kTwoPi * r0 / cells[1], height / cells[2]});
         return std::min({radial, kTwoPi * (major - r1) / cells[1], kTwoPi * r0 / cells[2]});
     }
 
-    // Conformal: columns of the Jacobian of map() at p.
+    // Mapped: columns of the Jacobian of map() at p.
     void jacobian(Vec3 p, Vec3 J[3]) const {
+        if (kind == ShapeKind::Box) {
+            J[0] = {boxCell(0, p.x), 0, 0}, J[1] = {0, boxCell(1, p.y), 0}, J[2] = {0, 0, boxCell(2, p.z)};
+            return;
+        }
         const double r = radius(p.x), a = kTwoPi * p.y / cells[1];
         const double dr = (logRadial ? r * std::log(r1 / r0) : r1 - r0) / cells[0];
         const double ca = std::cos(a), sa = std::sin(a), da = kTwoPi / cells[1];
@@ -200,7 +243,7 @@ struct Shape {
         J[2] = Vec3{-sb * ca, -sb * sa, cb} * (r * kTwoPi / cells[2]);
     }
 
-    // Conformal: a field gradient g in parameter space as the gradient in mm,
+    // Mapped: a field gradient g in parameter space as the gradient in mm,
     // J^-T g.
     Vec3 gradient(Vec3 p, Vec3 g) const {
         Vec3 J[3];
@@ -222,10 +265,11 @@ struct Shape {
         return std::hypot(rho - major, z) - r1;
     }
 
-    // Volume in mm^3 (not for the box).
+    // Volume in mm^3.
     double volume() const {
         const double pi = 0.5 * kTwoPi;
         switch (kind) {
+        case ShapeKind::Box: return boxPos(0, cells[0]) * boxPos(1, cells[1]) * boxPos(2, cells[2]);
         case ShapeKind::Tube: return pi * (r1 * r1 - r0 * r0) * height;
         case ShapeKind::TorusShell: return 2 * pi * pi * major * (r1 * r1 - r0 * r0);
         case ShapeKind::Cylinder: return pi * r1 * r1 * height;
@@ -240,27 +284,41 @@ struct Lattice {
     SurfaceFn f = gyroid;
     Form form = Form::Sheet;
     Part part = Part::Solid;
-    double level = 0.0;               // iso level c
-    double cell[3] = {10, 10, 10};    // unit cell size per axis: mm, or 1 in a conformal parameter box
+    double level = 0.0;               // iso level c (graded: at the start)
+    double cell[3] = {10, 10, 10};    // unit cell size per axis: mm, or 1 in a parameter box
     Shape shape;                      // trimmed shapes cut the field
+    // Graded: c along lattice axis `grade`, from coordinate gradeFrom to
+    // gradeTo, as evenly spaced values (linear in between).
+    int grade = -1;
+    double gradeFrom = 0, gradeTo = 1;
+    std::vector<double> levels;
 
     // Surface function f at a point.
     double value(double x, double y, double z) const {
         return f(kTwoPi * x / cell[0], kTwoPi * y / cell[1], kTwoPi * z / cell[2]);
     }
 
+    // Iso level c at a point.
+    double levelAt(double x, double y, double z) const {
+        if (grade < 0) return level;
+        const double p = grade == 0 ? x : grade == 1 ? y : z;
+        const double t = std::clamp((p - gradeFrom) / (gradeTo - gradeFrom), 0.0, 1.0) * double(levels.size() - 1);
+        const size_t i = std::min(size_t(t), levels.size() - 2);
+        return levels[i] + (levels[i + 1] - levels[i]) * (t - double(i));
+    }
+
     // Signed field at a point. Negative inside the exported region.
     double operator()(double x, double y, double z) const {
-        const double v = value(x, y, z);
-        double g = form == Form::Sheet ? std::fabs(v) - level : v - level;
+        const double v = value(x, y, z), c = levelAt(x, y, z);
+        double g = form == Form::Sheet ? std::fabs(v) - c : v - c;
         if (part == Part::Void) g = -g;
         return shape.trimmed() ? std::max(g, shape.inside(x, y, z)) : g;
     }
 };
 
-// Iso level c that gives the requested solid volume fraction (0..1) in one unit
-// cell. Takes the quantile of f (network) or |f| (sheet) over n^3 cell samples.
-inline double levelForDensity(SurfaceFn f, Form form, double density, int n = 100) {
+// Sorted values of f (network) or |f| (sheet) at n^3 points of one unit
+// cell. The iso level for solid fraction R is their R-quantile.
+inline std::vector<double> cellValues(SurfaceFn f, Form form, int n = 100) {
     std::vector<double> vals;
     vals.reserve(size_t(n) * n * n);
     const double h = kTwoPi / n;
@@ -270,9 +328,13 @@ inline double levelForDensity(SurfaceFn f, Form form, double density, int n = 10
                 const double v = f((i + 0.5) * h, (j + 0.5) * h, (k + 0.5) * h);
                 vals.push_back(form == Form::Sheet ? std::fabs(v) : v);
             }
-    const size_t idx = std::min(vals.size() - 1, size_t(density * double(vals.size())));
-    std::nth_element(vals.begin(), vals.begin() + std::ptrdiff_t(idx), vals.end());
-    return vals[idx];
+    std::sort(vals.begin(), vals.end());
+    return vals;
+}
+
+// Iso level c that gives solid volume fraction R (0..1) in one unit cell.
+inline double levelForDensity(const std::vector<double>& cellValues, double density) {
+    return cellValues[std::min(cellValues.size() - 1, size_t(density * double(cellValues.size())))];
 }
 
 }  // namespace tpms

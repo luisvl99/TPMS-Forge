@@ -2,7 +2,7 @@
 
 `tpms` turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface. There is a command-line tool, `tpms`, and a desktop app with a live 3D preview, `tpms-gui`.
 
-**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube or torus shell with cells that follow the curvature (smooth STEP too), or a cylinder, sphere or torus cut from a straight lattice (STL and faceted STEP so far).
+**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube or torus shell with cells that follow the curvature (smooth STEP too), or a cylinder, sphere or torus cut from a straight lattice (STL and faceted STEP so far). Density and cell size can be graded, and a property report gives volumes, wetted area, hydraulic diameters and wall thickness for CFD and FEA.
 
 ![tpms-gui](docs/gui.png)
 
@@ -13,6 +13,7 @@ Run `build/tpms-gui`.
 - **Left panel:** every option of the command line, grouped as Surface, Shape and Export. Numbers are typed (with − / + buttons) and clamped to valid values. Options that do not apply to the chosen output file are hidden: mesh resolution for STEP, patches and tolerance for STL.
 - **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread in about half a second. Each wall (level set) is meshed on its own, so even very thin sheets show without holes; the cuts on the box faces come from a 2D grid 4 times finer. The line above the view gives the triangle count and the solid fraction (from quasi-random samples of the field, not from the preview mesh). Pieces that the export drops as fragments are still drawn. The solid is gray. The fluid (`--part void`) is blue; the fluid of a sheet is two separate channels, one on each side of the sheet (f > c and f < −c), drawn blue and red. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
 - **Export:** writes the file on a worker thread. The log shows the same report as the command line.
+- **Property report:** volumes, wetted area, hydraulic diameters, wall thickness and connectivity of the solid and the fluid, in the log (see [Property report](#property-report)).
 - **Command line:** the equivalent `tpms` command, with a Copy button. Use it to repeat an export or to script one.
 
 `tpms-gui` also takes the `tpms` options, so `tpms-gui --type diamond --density 0.3 -o d.step` (for example a copied command line) opens with those settings. `tpms-gui --screenshot FILE.ppm [options]` renders once the preview is final, saves the window as an image and quits (for docs and tests).
@@ -53,6 +54,18 @@ Schwarz P network with an explicit iso level and non-cubic cells:
 build/tpms --type schwarz-p --form network --level 0.3 --cell 10 10 15 --cells 3 3 2 -o p.step
 ```
 
+Graded: solid fraction from 0.1 to 0.4 along x, and cells that grow from 5 to 15 mm along x:
+
+```bash
+build/tpms --density 0.1 0.4 --grade x --cell 5 --cells 4 2 2 --cell-grade x 15 -o graded.step
+```
+
+Property report of a tube, printed and written as JSON:
+
+```bash
+build/tpms --shape tube --radius 10 20 --height 20 --cells 1 8 2 --report -o tube.json
+```
+
 Run `build/tpms --help` for all options. Run `build/tpms --list` for all surface types.
 
 ## Surface types
@@ -75,6 +88,31 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 - `--form network` is the region f ≤ c: one of the two channel networks.
 - `--density R` finds c so that one unit cell has solid volume fraction R. It always means the solid fraction, also with `--part void`.
 - `--part void` exports the shape minus the solid. Use it as the fluid domain for CFD. A sheet lattice in a box has two separate fluid regions, so you get two solids.
+
+## Grading
+
+- `--density R0 R1` changes the solid fraction linearly from R0 at the start of an axis to R1 at its end. `--grade x|y|z` picks the axis (default x). For a tube or torus shell the axes are the cell axes: x radial, y around, z along the axis (tube) or around the tube (torus shell). The change is linear in the cell count along the axis. `--level C0 C1` grades the iso level instead.
+- `--cell-grade x|y|z L1` (box) changes the cell length along that axis linearly from `--cell` at the start to L1 mm at the end. The other cell edges keep their size, so cells stretch along the axis. The box length along it is n × (L0 + L1) / 2.
+- Both work with every output, and both can be combined. The tool prints the overall solid fraction the grading gives.
+- Smooth STEP of a cell-graded box is built like the tube: in a box with one unit per cell, mapped to mm. The patches then follow the cells at any size.
+
+## Property report
+
+`--report` prints the properties of the solid and the fluid (void), whatever `--part` exports. An output ending in `.json` gets the same report as JSON. The GUI has a Property report button.
+
+| Value | Meaning |
+|---|---|
+| Solid / fluid volume | mm³, with solid fraction and porosity |
+| Wetted area | area of the walls between solid and fluid, mm² (without the cut faces on the shape) |
+| Specific surface | wetted area / shape volume, 1/mm and m²/m³ |
+| Hydraulic diameter | 4 × fluid volume / wetted area, overall and per fluid channel |
+| Channels | a sheet's fluid is two channels, f > c and f < −c, one on each side of the sheet; each gets its own volume, wetted area and hydraulic diameter |
+| Wall thickness (sheet) | mean 2 × solid volume / wetted area, and the local range 2 c / \|∇f\| on the walls |
+| Solid size (network) | 4 × solid volume / wetted area, like a strut diameter |
+| Pieces | each solid and fluid piece with its volume and the faces of the shape it touches |
+| Connects | for each pair of opposite faces (x− / x+, inner / outer, bottom / top), whether the solid and each fluid channel connect them: flow through for CFD, load path for FEA |
+
+The values come from closed meshes at `--res` steps per cell; the fluid channels are meshed one at a time. Volumes and areas are within about 1 % at the default `--res 24`: the solid volume, wetted plus cut area of a gyroid tube and torus shell match Onshape's mass properties of the smooth STEP within 1 % and 0.3 %. The report warns when walls are thinner than a mesh step; raise `--res` then.
 
 ## Shapes
 
@@ -219,5 +257,6 @@ For a tube or torus shell, the same steps run in the parameter box (one unit per
 - **v2 (done):** GUI with every command-line option and a live preview.
 - **Curved shapes, phase 1 (done):** tube and torus shell with cells that follow the shape; trimmed cylinder, sphere and torus; preview, STL and faceted STEP.
 - **Curved shapes, phase 2 (done):** smooth STEP for the tube and torus shell, with exact cylinder, torus and plane caps.
-- **Next:** faster merge and smaller merged files on curved shapes; graded density and cell size.
+- **Graded lattices and property report (done):** graded solid fraction or level along an axis, graded cell size in a box, and the report.
+- **Next:** CFD domains (skins, inlet and outlet buffers); unit cell export for FEA homogenization; custom formulas and more surfaces.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.

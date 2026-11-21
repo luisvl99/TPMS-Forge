@@ -10,7 +10,7 @@ endif()
 option(TPMS_GUI "Build tpms-gui (downloads Dear ImGui and GLFW)" ON)
 
 # Core shared by the CLI and the GUI.
-add_library(tpmscore STATIC src/run.cpp src/mesher.cpp src/export.cpp src/smooth.cpp)
+add_library(tpmscore STATIC src/run.cpp src/report.cpp src/mesher.cpp src/export.cpp src/smooth.cpp)
 target_include_directories(tpmscore PUBLIC src)
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND AND MINGW)
@@ -80,6 +80,9 @@ endforeach()
 # Smooth STEP of the curved shapes: seams welded, curved caps, merged faces.
 add_test(NAME smooth-tube COMMAND tpms --shape tube --radius 10 20 --height 10 --cells 1 6 1 -o ${CMAKE_BINARY_DIR}/test-tube.step)
 add_test(NAME smooth-torus-shell COMMAND tpms --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4 -o ${CMAKE_BINARY_DIR}/test-torus-shell.step)
+# Graded density and cell size (a mapped box), and the property report.
+add_test(NAME smooth-graded COMMAND tpms --cell 5 --cells 3 2 2 --cell-grade x 10 --density 0.3 0.15 --grade x -o ${CMAKE_BINARY_DIR}/test-graded.step)
+add_test(NAME report COMMAND tpms --shape tube --radius 10 20 --height 10 --cells 1 6 1 --report -o ${CMAKE_BINARY_DIR}/test-report.json)
 # Every shape as a closed STL mesh (exit 1 if not closed, 2 if empty).
 add_test(NAME shape-tube COMMAND tpms --shape tube --radius 10 20 --height 20 --cells 1 8 2 --res 12 -o ${CMAKE_BINARY_DIR}/test-tube.stl)
 add_test(NAME shape-torus-shell COMMAND tpms --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4 --res 10 -o ${CMAKE_BINARY_DIR}/test-torus-shell.stl)
