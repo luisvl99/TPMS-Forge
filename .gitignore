@@ -3,3 +3,12 @@ out/
 *.step
 *.stp
 *.stl
+
+# Local notes and tool files, kept out of the public repository
+HANDOFF.md
+notes/
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.venv*/
+__pycache__/

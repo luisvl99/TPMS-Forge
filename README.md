@@ -223,6 +223,8 @@ python -m pip install cadquery-ocp
 python tools/check_step.py lattice.step
 ```
 
+Add `--periodic` for unit cells: it compares the faces on opposite sides. Add `--names` to list the solid and face names that OpenCASCADE's document reader finds.
+
 Results for 2 x 2 x 2 cells at density 0.3 (sheet and network, solid and void):
 
 - With `--exact`, all 7 surface types read as valid closed solids. The volumes match the solid fraction the tool prints within 0.0003.
