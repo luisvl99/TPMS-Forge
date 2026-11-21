@@ -117,30 +117,31 @@ bool saveDialog(char* path, size_t size) {
 #endif
 }
 
-// Preview: the faceted mesh, built on a worker thread. The first pass is
-// coarse (about 1 million grid nodes) so it follows the sliders; `next` asks
-// for a finer pass when the grid is too coarse for the walls.
+// Preview: the walls and the cuts on the box faces, built on a worker thread.
 struct Preview {
     std::vector<float> tris;  // per vertex: x y z nx ny nz
     float box[3] = {0, 0, 0};
     bool solid = true;
-    int next = 0;  // steps per cell of the finer pass to run, or 0
     std::string info, error;
 };
 
-Preview buildPreview(const std::vector<std::string>& args, int res) {
+Preview buildPreview(const std::vector<std::string>& args) {
     Preview p;
     Options o;
     if (!parseArgs(args, o, p.error)) return p;
     const double nCells = double(o.cells[0]) * o.cells[1] * o.cells[2];
-    if (res == 0) res = std::clamp(int(std::cbrt(1e6 / nCells)), 6, 20);
+    const int res = std::clamp(int(std::cbrt(1.5e6 / nCells)), 6, 24);
     const Lattice lat = makeLattice(o);
-    const Pieces pieces = keepPieces(meshLattice(lat, o.cells, res), o.minFragment);
-    double boxVol = 1;
-    for (int a = 0; a < 3; ++a) p.box[a] = float(o.cells[a] * o.cell[a]), boxVol *= p.box[a];
+    for (int a = 0; a < 3; ++a) p.box[a] = float(o.cells[a] * o.cell[a]);
     p.solid = o.part == Part::Solid;
-    // Walls get the exact normal (gradient of the field) at each vertex, so
-    // they shade smoothly; caps on the box faces stay flat.
+    auto add = [&](const Vec3& v, const Vec3& n) {
+        p.tris.insert(p.tris.end(), {float(v.x), float(v.y), float(v.z), float(n.x), float(n.y), float(n.z)});
+    };
+
+    // Walls: each level set f = c meshed alone, as the boundary of f < c.
+    // A sheet's two walls can be closer than a grid step, but each wall alone
+    // is smooth, so the preview has no holes at any thickness. Normals are the
+    // gradient of the exported field: smooth, and pointing out of the solid.
     const double d = 1e-4 * std::min({o.cell[0], o.cell[1], o.cell[2]});
     auto onBoxFace = [&](const Vec3& a, const Vec3& b, const Vec3& c) {
         for (int k = 0; k < 3; ++k)
@@ -148,7 +149,12 @@ Preview buildPreview(const std::vector<std::string>& args, int res) {
                 if (std::fabs(a[k] - side) < d && std::fabs(b[k] - side) < d && std::fabs(c[k] - side) < d) return true;
         return false;
     };
-    for (const Mesh& m : pieces.kept) {
+    std::vector<double> levels = {lat.level};
+    if (lat.form == Form::Sheet) levels.push_back(-lat.level);
+    for (double c : levels) {
+        Lattice wall = lat;
+        wall.form = Form::Network, wall.part = Part::Solid, wall.level = c;
+        const Mesh m = meshLattice(wall, o.cells, res);
         std::vector<Vec3> normals;
         for (const Vec3& v : m.vertices) {
             Vec3 g;
@@ -159,37 +165,68 @@ Preview buildPreview(const std::vector<std::string>& args, int res) {
             }
             normals.push_back(g * (1.0 / std::max(norm(g), 1e-30)));
         }
-        for (const auto& t : m.triangles) {
-            const Vec3 &a = m.vertices[t[0]], &b = m.vertices[t[1]], &c = m.vertices[t[2]];
-            Vec3 flat = cross(b - a, c - a);
-            flat = flat * (1.0 / std::max(norm(flat), 1e-30));
-            const bool cap = onBoxFace(a, b, c);
-            for (int k = 0; k < 3; ++k) {
-                const Vec3& v = m.vertices[t[size_t(k)]];
-                const Vec3& n = cap ? flat : normals[t[size_t(k)]];
-                p.tris.insert(p.tris.end(), {float(v.x), float(v.y), float(v.z), float(n.x), float(n.y), float(n.z)});
-            }
-        }
+        for (const auto& t : m.triangles)
+            if (!onBoxFace(m.vertices[t[0]], m.vertices[t[1]], m.vertices[t[2]]))
+                for (uint32_t v : t) add(m.vertices[v], normals[v]);
     }
-    if (pieces.kept.empty()) {
+
+    // Cuts on the box faces: the exported region of each face, clipped on a
+    // 2D grid 4 times finer than the walls (thin sheets give thin bands).
+    for (int a = 0; a < 3; ++a)
+        for (int side = 0; side < 2; ++side) {
+            const int u = (a + 1) % 3, v = (a + 2) % 3, nu = 4 * res * o.cells[u], nv = 4 * res * o.cells[v];
+            Vec3 n;
+            n[a] = side ? 1 : -1;
+            auto at = [&](int i, int j) {
+                Vec3 q;
+                q[a] = side ? p.box[a] : 0, q[u] = p.box[u] * i / nu, q[v] = p.box[v] * j / nv;
+                return q;
+            };
+            std::vector<double> g(size_t(nu + 1) * size_t(nv + 1));
+            for (int j = 0; j <= nv; ++j)
+                for (int i = 0; i <= nu; ++i) {
+                    const Vec3 q = at(i, j);
+                    g[size_t(j) * size_t(nu + 1) + size_t(i)] = lat(q.x, q.y, q.z);
+                }
+            auto clip = [&](const int (&c)[3][2]) {
+                Vec3 P[3], poly[4];
+                double G[3];
+                for (int k = 0; k < 3; ++k)
+                    P[k] = at(c[k][0], c[k][1]), G[k] = g[size_t(c[k][1]) * size_t(nu + 1) + size_t(c[k][0])];
+                int m = 0;
+                for (int k = 0; k < 3; ++k) {
+                    const int l = (k + 1) % 3;
+                    if (G[k] < 0) poly[m++] = P[k];
+                    if ((G[k] < 0) != (G[l] < 0)) poly[m++] = P[k] + (P[l] - P[k]) * (G[k] / (G[k] - G[l]));
+                }
+                for (int k = 1; k + 1 < m; ++k) add(poly[0], n), add(poly[k], n), add(poly[k + 1], n);
+            };
+            for (int j = 0; j < nv; ++j)
+                for (int i = 0; i < nu; ++i) {
+                    clip({{i, j}, {i + 1, j}, {i + 1, j + 1}});
+                    clip({{i, j}, {i + 1, j + 1}, {i, j + 1}});
+                }
+        }
+    if (p.tris.empty()) {
         p.error = "Nothing to show: no solid at this density / level.";
         return p;
     }
-    const double frac = p.solid ? pieces.volume / boxVol : 1 - pieces.volume / boxVol;
-    // Walls thinner than the grid step drop out as holes and fragments, and
-    // the solid fraction falls short of the target. Then refine, up to about
-    // 6 million grid nodes.
-    const bool missing =
-        (!o.hasLevel && std::fabs(frac - o.density) > 0.03 * o.density) || double(pieces.fragments) > 4 * nCells;
-    const int finer = res * 3 / 2;
-    if (missing && double(finer * o.cells[0] + 1) * (finer * o.cells[1] + 1) * (finer * o.cells[2] + 1) < 6e6)
-        p.next = finer;
-    char b[256];
-    std::snprintf(b, sizeof b, "Preview: %zu triangles (%d steps per cell), %zu solid(s), solid fraction %.3f",
-                  pieces.triangles, res, pieces.kept.size(), frac);
+
+    // Solid fraction from quasi-random points, so it does not depend on the
+    // preview mesh.
+    const double g3 = 1.2207440846057595, step[3] = {1 / g3, 1 / (g3 * g3), 1 / (g3 * g3 * g3)};
+    const int samples = 1 << 16;
+    int in = 0;
+    for (int k = 0; k < samples; ++k) {
+        double x[3];
+        for (int a = 0; a < 3; ++a) x[a] = std::fmod(0.5 + k * step[a], 1.0) * p.box[a];
+        in += lat(x[0], x[1], x[2]) < 0;
+    }
+    const double frac = p.solid ? double(in) / samples : 1 - double(in) / samples;
+    char b[200];
+    std::snprintf(b, sizeof b, "Preview: %zu triangles (%d steps per cell), solid fraction %.3f", p.tris.size() / 18, res,
+                  frac);
     p.info = b;
-    if (pieces.fragments) p.info += ", " + std::to_string(pieces.fragments) + " fragment(s) dropped";
-    if (pieces.cavities) p.info += ", " + std::to_string(pieces.cavities) + " cavity shell(s) dropped";
     return p;
 }
 
@@ -239,10 +276,15 @@ void drawScene(const Preview& p, GLuint list, const Camera& cam, int x, int y, i
     glFrustum(-right, right, -top, top, zNear, zFar);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    const float light[4] = {0.4f, 0.6f, 1, 0};  // eye space: a headlight from the upper right
-    const float diffuse[4] = {0.8f, 0.8f, 0.8f, 1};
-    glLightfv(GL_LIGHT0, GL_POSITION, light);
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, diffuse);
+    // Eye space: a key light from the upper right and a weak fill light from
+    // the left, so faces turned away from the key light stay readable.
+    const float key[4] = {0.4f, 0.6f, 1, 0}, keyDiffuse[4] = {0.7f, 0.7f, 0.7f, 1};
+    const float fill[4] = {-0.8f, -0.2f, 0.5f, 0}, fillDiffuse[4] = {0.3f, 0.3f, 0.32f, 1};
+    glLightfv(GL_LIGHT0, GL_POSITION, key);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, keyDiffuse);
+    glLightfv(GL_LIGHT1, GL_POSITION, fill);
+    glLightfv(GL_LIGHT1, GL_DIFFUSE, fillDiffuse);
+    glLightfv(GL_LIGHT1, GL_SPECULAR, fillDiffuse);
     glTranslatef(cam.panX, cam.panY, -cam.dist);
     glRotatef(cam.pitch - 90, 1, 0, 0);
     glRotatef(cam.yaw, 0, 0, 1);
@@ -251,7 +293,9 @@ void drawScene(const Preview& p, GLuint list, const Camera& cam, int x, int y, i
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_LIGHTING);
     glEnable(GL_LIGHT0);
-    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE);
+    glEnable(GL_LIGHT1);
+    // One-sided: normals point out of the solid, whatever the triangle winding.
+    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_FALSE);
     const float ambient[4] = {0.22f, 0.22f, 0.22f, 1}, specular[4] = {0.2f, 0.2f, 0.2f, 1};
     glLightModelfv(GL_LIGHT_MODEL_AMBIENT, ambient);
     glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, specular);
@@ -387,12 +431,10 @@ int main(int argc, char** argv) {
             const std::string box = num(shown.box[0]) + " " + num(shown.box[1]) + " " + num(shown.box[2]);
             if (box != lastBox && !shown.tris.empty()) fit(cam, shown.box), lastBox = box;
             list = compile(shown, list);
-            if (shown.next && shownKey == wantedKey)  // show this pass, refine in the background
-                previewJob = std::async(std::launch::async, buildPreview, geometry, shown.next);
         }
         if (!previewJob.valid() && wantedKey != shownKey) {
             shownKey = wantedKey;
-            previewJob = std::async(std::launch::async, buildPreview, geometry, 0);
+            previewJob = std::async(std::launch::async, buildPreview, geometry);
         }
         if (exportJob.valid() && exportJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             const int rc = exportJob.get();

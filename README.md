@@ -11,7 +11,7 @@
 Run `build/tpms-gui`.
 
 - **Left panel:** every option of the command line, grouped as Surface, Box and Export. Options that do not apply to the chosen output file are hidden: mesh resolution for STEP, patches and tolerance for STL.
-- **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread. It first shows a coarse mesh (up to 20 steps per cell). If thin walls come out with holes (the solid fraction falls short of the target, or many fragments drop out), it refines in the background by 1.5x per pass, up to about 6 million grid nodes. The line above the view gives the triangle count, solids, solid fraction and dropped pieces. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
+- **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread in about half a second. Each wall (level set) is meshed on its own, so even very thin sheets show without holes; the cuts on the box faces come from a 2D grid 4 times finer. The line above the view gives the triangle count and the solid fraction (from quasi-random samples of the field, not from the preview mesh). Pieces that the export drops as fragments are still drawn. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
 - **Export:** writes the file on a worker thread. The log shows the same report as the command line.
 - **Command line:** the equivalent `tpms` command, with a Copy button. Use it to repeat an export or to script one.
 
