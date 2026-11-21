@@ -88,6 +88,9 @@ add_test(NAME unit-cell COMMAND tpms --unit-cell --type diamond --cell 8 10 12 -
 add_test(NAME smooth-plates COMMAND tpms --plates z 1 2 -o ${CMAKE_BINARY_DIR}/test-plates.step)
 add_test(NAME smooth-buffers COMMAND tpms --part void --buffers x 5 -o ${CMAKE_BINARY_DIR}/test-buffers.step)
 add_test(NAME report COMMAND tpms --shape tube --radius 10 20 --height 10 --cells 1 6 1 --report -o ${CMAKE_BINARY_DIR}/test-report.json)
+# Conflicting options must be refused (exit 2), not silently resolved.
+add_test(NAME usage-density-and-level COMMAND tpms --density 0.3 --level 0.5 -o ${CMAKE_BINARY_DIR}/test-usage.stl)
+set_tests_properties(usage-density-and-level PROPERTIES WILL_FAIL TRUE)
 # Every shape as a closed STL mesh (exit 1 if not closed, 2 if empty).
 add_test(NAME shape-tube COMMAND tpms --shape tube --radius 10 20 --height 20 --cells 1 8 2 --res 12 -o ${CMAKE_BINARY_DIR}/test-tube.stl)
 add_test(NAME shape-torus-shell COMMAND tpms --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4 --res 10 -o ${CMAKE_BINARY_DIR}/test-torus-shell.stl)

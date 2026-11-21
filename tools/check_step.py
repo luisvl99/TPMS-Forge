@@ -10,6 +10,7 @@ across the box. Periodic boundary conditions in FEA need them to match.
 and how many faces carry each face name.
 """
 import collections
+import os
 import sys
 import time
 
@@ -100,11 +101,13 @@ def names(path):
 
 
 args = [a for a in sys.argv[1:] if a not in ("--periodic", "--names")]
+failed = 0
 for path in args:
     t0 = time.time()
     reader = STEPControl_Reader()
     if reader.ReadFile(path) != IFSelect_RetDone:
         print(f"{path}: READ FAILED")
+        failed += 1
         continue
     reader.TransferRoots()
     shape = reader.OneShape()
@@ -122,9 +125,11 @@ for path in args:
         props = GProp_GProps()
         BRepGProp.VolumeProperties_s(s, props)
         vol += props.Mass()
-    print(f"{path.split('/')[-1]}: solids={len(solids)} shells={len(shells)} closed_shells={closed} "
+    failed += not (valid and solids and closed == len(shells))
+    print(f"{os.path.basename(path)}: solids={len(solids)} shells={len(shells)} closed_shells={closed} "
           f"faces={faces} valid={valid} volume={vol:.4f} mm3 read={t_read:.1f}s check={t_check:.1f}s")
     if "--periodic" in sys.argv:
         print("  periodic:", periodic(shape))
     if "--names" in sys.argv:
         print("  names:", names(path))
+sys.exit(1 if failed else 0)  # usable in CI

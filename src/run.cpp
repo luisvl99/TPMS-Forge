@@ -216,7 +216,7 @@ const char* shapeName(ShapeKind k) {
 
 bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& error) {
     double cells[3] = {double(o.cells[0]), double(o.cells[1]), double(o.cells[2])};
-    bool cellGiven = false, cellsGiven = false;
+    bool cellGiven = false, cellsGiven = false, densityGiven = false;
     int radii = 0;
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
@@ -241,7 +241,8 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
             const bool isLevel = a == "--level";
             (isLevel ? o.level : o.density) = r[0];
             (isLevel ? o.level1 : o.density1) = r[n - 1];
-            o.hasLevel |= isLevel;
+            o.hasLevel |= isLevel, densityGiven |= !isLevel;
+            if (o.hasLevel && densityGiven) return error = "use --density or --level, not both", false;
             o.graded = n == 2;
         } else if (a == "--grade" && hasValue) {
             if ((o.grade = axisOf(lower(args[++i]))) < 0) return error = "--grade must be x, y or z", false;
@@ -293,10 +294,10 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
             if (s == "log" || s == "linear") o.shape.logRadial = s == "log";
             else return error = "--radial must be log or linear", false;
         } else if (a == "--res" && hasValue && number(args[i + 1], v)) {
-            o.res = int(v);
+            o.res = int(std::clamp(v, 0.0, 1e4));  // int() of a huge value is undefined; range checked below
             ++i;
         } else if (a == "--patches" && hasValue && number(args[i + 1], v)) {
-            o.patches = int(v);
+            o.patches = int(std::clamp(v, 0.0, 1e4));
             ++i;
         } else if (a == "--tol" && hasValue && number(args[i + 1], v)) {
             o.tol = v;
@@ -360,13 +361,14 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
     }
     for (int a = 0; a < 3; ++a) {
         if (!(o.cell[a] > 0)) return error = "--cell must be > 0", false;
-        if (cells[a] < 1 || cells[a] != std::floor(cells[a])) return error = "--cells must be whole numbers >= 1", false;
+        if (cells[a] < 1 || cells[a] > 1e5 || cells[a] != std::floor(cells[a]))
+            return error = "--cells must be whole numbers from 1 to 100000", false;
         o.cells[a] = int(cells[a]);
         s.cells[a] = cells[a];
         s.cellSize[a] = o.cell[a];
     }
-    if (o.res < 4) return error = "--res must be >= 4", false;
-    if (o.patches < 2) return error = "--patches must be >= 2", false;
+    if (o.res < 4 || o.res > 1000) return error = "--res must be from 4 to 1000", false;
+    if (o.patches < 2 || o.patches > 1000) return error = "--patches must be from 2 to 1000", false;
     if (o.tol < 0) return error = "--tol must be > 0", false;
     if (o.tol == 0) o.tol = autoTol(o);
     for (const auto& out : o.outputs) {
@@ -684,8 +686,10 @@ int run(const std::vector<std::string>& args, const Print& print) {
             writeSmoothStep(out, p.stem().string(), lat, cells, o.patches, o.tol, o.minFragment, o.exact,
                             expected * shapeVol + slabVol, shapeVol + slabVol);
         if (!r.error.empty()) {
-            say(print, "error: %s: %s at %d patches per cell. Try a higher --patches.", out.c_str(), r.error.c_str(),
-                r.patches);
+            if (r.error == "nothing to export") say(print, "error: nothing to export. Check --density / --level.");
+            else if (r.error.rfind("cannot write", 0) == 0) say(print, "error: %s", r.error.c_str());
+            else say(print, "error: %s: %s at %d patches per cell. Try a higher --patches.", out.c_str(),
+                     r.error.c_str(), r.patches);
             ok = false;
             continue;
         }
