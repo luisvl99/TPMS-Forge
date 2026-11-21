@@ -117,21 +117,23 @@ bool saveDialog(char* path, size_t size) {
 #endif
 }
 
-// Preview: the faceted mesh at a resolution that keeps about 2 million grid
-// nodes, so it follows the sliders. Built on a worker thread.
+// Preview: the faceted mesh, built on a worker thread. The first pass is
+// coarse (about 1 million grid nodes) so it follows the sliders; `next` asks
+// for a finer pass when the grid is too coarse for the walls.
 struct Preview {
     std::vector<float> tris;  // per vertex: x y z nx ny nz
     float box[3] = {0, 0, 0};
     bool solid = true;
+    int next = 0;  // steps per cell of the finer pass to run, or 0
     std::string info, error;
 };
 
-Preview buildPreview(const std::vector<std::string>& args) {
+Preview buildPreview(const std::vector<std::string>& args, int res) {
     Preview p;
     Options o;
     if (!parseArgs(args, o, p.error)) return p;
     const double nCells = double(o.cells[0]) * o.cells[1] * o.cells[2];
-    const int res = std::clamp(int(std::cbrt(2e6 / nCells)), 6, 20);
+    if (res == 0) res = std::clamp(int(std::cbrt(1e6 / nCells)), 6, 20);
     const Lattice lat = makeLattice(o);
     const Pieces pieces = keepPieces(meshLattice(lat, o.cells, res), o.minFragment);
     double boxVol = 1;
@@ -174,6 +176,14 @@ Preview buildPreview(const std::vector<std::string>& args) {
         return p;
     }
     const double frac = p.solid ? pieces.volume / boxVol : 1 - pieces.volume / boxVol;
+    // Walls thinner than the grid step drop out as holes and fragments, and
+    // the solid fraction falls short of the target. Then refine, up to about
+    // 6 million grid nodes.
+    const bool missing =
+        (!o.hasLevel && std::fabs(frac - o.density) > 0.03 * o.density) || double(pieces.fragments) > 4 * nCells;
+    const int finer = res * 3 / 2;
+    if (missing && double(finer * o.cells[0] + 1) * (finer * o.cells[1] + 1) * (finer * o.cells[2] + 1) < 6e6)
+        p.next = finer;
     char b[256];
     std::snprintf(b, sizeof b, "Preview: %zu triangles (%d steps per cell), %zu solid(s), solid fraction %.3f",
                   pieces.triangles, res, pieces.kept.size(), frac);
@@ -193,14 +203,33 @@ void fit(Camera& cam, const float box[3]) {
     cam.dist = 1.25f * 0.5f * std::sqrt(box[0] * box[0] + box[1] * box[1] + box[2] * box[2]) / std::tan(0.2618f);
 }
 
-void drawScene(const Preview& p, const Camera& cam, int x, int y, int w, int h) {
+// Compiles the preview triangles into a display list, which the driver keeps
+// on the GPU: a million triangles then orbit smoothly. Frees the copy.
+GLuint compile(Preview& p, GLuint old) {
+    if (old) glDeleteLists(old, 1);
+    if (p.tris.empty()) return 0;
+    const GLuint list = glGenLists(1);
+    glNewList(list, GL_COMPILE);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_NORMAL_ARRAY);
+    glVertexPointer(3, GL_FLOAT, 6 * sizeof(float), p.tris.data());
+    glNormalPointer(GL_FLOAT, 6 * sizeof(float), p.tris.data() + 3);
+    glDrawArrays(GL_TRIANGLES, 0, GLsizei(p.tris.size() / 6));
+    glDisableClientState(GL_NORMAL_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glEndList();
+    p.tris = {};
+    return list;
+}
+
+void drawScene(const Preview& p, GLuint list, const Camera& cam, int x, int y, int w, int h) {
     glViewport(x, y, w, h);
     glScissor(x, y, w, h);
     glEnable(GL_SCISSOR_TEST);
     glClearColor(0.12f, 0.13f, 0.15f, 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glDisable(GL_SCISSOR_TEST);
-    if (p.tris.empty() || w <= 0 || h <= 0) return;
+    if (!list || w <= 0 || h <= 0) return;
 
     const float r = 0.5f * std::sqrt(p.box[0] * p.box[0] + p.box[1] * p.box[1] + p.box[2] * p.box[2]);
     const double zNear = std::max(cam.dist - 2 * r, 0.01f * r), zFar = cam.dist + 2 * r;
@@ -231,13 +260,7 @@ void drawScene(const Preview& p, const Camera& cam, int x, int y, int w, int h) 
     glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
     if (p.solid) glColor3f(0.72f, 0.75f, 0.80f);
     else glColor3f(0.40f, 0.66f, 0.82f);
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glEnableClientState(GL_NORMAL_ARRAY);
-    glVertexPointer(3, GL_FLOAT, 6 * sizeof(float), p.tris.data());
-    glNormalPointer(GL_FLOAT, 6 * sizeof(float), p.tris.data() + 3);
-    glDrawArrays(GL_TRIANGLES, 0, GLsizei(p.tris.size() / 6));
-    glDisableClientState(GL_NORMAL_ARRAY);
-    glDisableClientState(GL_VERTEX_ARRAY);
+    glCallList(list);
     glDisable(GL_LIGHTING);
 
     // Box edges, and x / y / z axes in red / green / blue at the origin.
@@ -282,11 +305,36 @@ void savePpm(const char* path, int w, int h) {
     }
 }
 
+// Settings from tpms options, so `tpms-gui [tpms options]` opens with a
+// copied command line filled in.
+Settings fromOptions(const Options& o) {
+    Settings s;
+    for (size_t k = 0; k < surfaces().size(); ++k)
+        if (&surfaces()[k] == findSurface(o.type)) s.type = int(k);
+    s.form = o.form == Form::Network, s.part = o.part == Part::Void;
+    s.thickness = o.hasLevel, s.density = float(o.density);
+    if (o.hasLevel) s.level = float(o.level);
+    for (int a = 0; a < 3; ++a) s.cell[a] = float(o.cell[a]), s.cells[a] = o.cells[a];
+    s.cubic = o.cell[0] == o.cell[1] && o.cell[1] == o.cell[2];
+    const double autoTol = 0.001 * std::min({o.cell[0], o.cell[1], o.cell[2]});
+    s.tol = std::fabs(o.tol - autoTol) < 1e-12 ? 0 : float(o.tol);
+    s.patches = o.patches, s.exact = o.exact, s.faceted = o.faceted, s.res = o.res;
+    s.minFragment = float(o.minFragment);
+    if (!o.outputs.empty()) std::snprintf(s.out, sizeof s.out, "%s", o.outputs[0].c_str());
+    return s;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::vector<std::string> args(argv + 1, argv + argc);
     // --screenshot FILE.ppm: render once the preview is ready, save, quit (docs and tests).
-    const char* screenshot = argc == 3 && std::strcmp(argv[1], "--screenshot") == 0 ? argv[2] : nullptr;
+    const char* screenshot = nullptr;
+    if (args.size() >= 2 && args[0] == "--screenshot") screenshot = argv[2], args.erase(args.begin(), args.begin() + 2);
+    Settings s;
+    Options startOptions;
+    std::string startError;
+    if (!args.empty() && parseArgs(args, startOptions, startError)) s = fromOptions(startOptions);
 
     if (!glfwInit()) return 1;
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
@@ -311,14 +359,14 @@ int main(int argc, char** argv) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL2_Init();
 
-    Settings s;
     Camera cam;
     Preview shown;
+    GLuint list = 0;  // display list of the shown preview
     std::string shownKey, wantedKey, lastBox;
     std::future<Preview> previewJob;
     std::future<int> exportJob;
     std::mutex logMutex;
-    std::string log, status;
+    std::string log = startError.empty() ? "" : "error: " + startError + "\n", status;
     auto exportStart = std::chrono::steady_clock::now();
     size_t logSize = 0;
     int frames = 0;
@@ -338,10 +386,13 @@ int main(int argc, char** argv) {
             shown = previewJob.get();
             const std::string box = num(shown.box[0]) + " " + num(shown.box[1]) + " " + num(shown.box[2]);
             if (box != lastBox && !shown.tris.empty()) fit(cam, shown.box), lastBox = box;
+            list = compile(shown, list);
+            if (shown.next && shownKey == wantedKey)  // show this pass, refine in the background
+                previewJob = std::async(std::launch::async, buildPreview, geometry, shown.next);
         }
         if (!previewJob.valid() && wantedKey != shownKey) {
             shownKey = wantedKey;
-            previewJob = std::async(std::launch::async, buildPreview, geometry);
+            previewJob = std::async(std::launch::async, buildPreview, geometry, 0);
         }
         if (exportJob.valid() && exportJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             const int rc = exportJob.get();
@@ -479,7 +530,7 @@ int main(int argc, char** argv) {
         int fbW, fbH;
         glfwGetFramebufferSize(window, &fbW, &fbH);
         const int panelPx = int(panelW * (io.DisplaySize.x > 0 ? fbW / io.DisplaySize.x : 1));
-        drawScene(shown, cam, panelPx, 0, fbW - panelPx, fbH);
+        drawScene(shown, list, cam, panelPx, 0, fbW - panelPx, fbH);
         glViewport(0, 0, fbW, fbH);
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
         if (screenshot && ++frames > 3 && !previewJob.valid() && shownKey == wantedKey) {
