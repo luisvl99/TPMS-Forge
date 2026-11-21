@@ -1,0 +1,53 @@
+#pragma once
+// The tpms command line as a function, shared by the CLI and the GUI.
+
+#include "mesher.hpp"
+#include "tpms.hpp"
+
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace tpms {
+
+// Receives output text without a trailing newline. Errors start with "error:".
+using Print = std::function<void(const std::string&)>;
+
+struct Options {
+    std::string type = "gyroid";
+    Form form = Form::Sheet;
+    Part part = Part::Solid;
+    double density = 0.2;
+    double level = 0;
+    bool hasLevel = false;
+    double cell[3] = {10, 10, 10};
+    int cells[3] = {2, 2, 2};
+    int res = 24;
+    int patches = 3;
+    double tol = 0;  // 0: 0.001 x smallest cell size
+    bool faceted = false;
+    bool exact = false;
+    double minFragment = 0.01;
+    std::vector<std::string> outputs;
+};
+
+// Parses and checks arguments (without the program name).
+bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& error);
+
+// The lattice the options describe; solves the iso level for --density.
+Lattice makeLattice(const Options& o);
+
+// The exported pieces of a closed mesh: without cavities and fragments
+// smaller than minFragment x the largest piece.
+struct Pieces {
+    std::vector<Mesh> kept;
+    size_t fragments = 0, cavities = 0, triangles = 0;
+    double volume = 0;
+};
+Pieces keepPieces(const Mesh& mesh, double minFragment);
+
+// Runs a tpms command line. Returns the exit code: 0 ok, 1 a check or write
+// failed, 2 usage error.
+int run(const std::vector<std::string>& args, const Print& print);
+
+}  // namespace tpms

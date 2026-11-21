@@ -1,12 +1,27 @@
 # tpms
 
-`tpms` is a command-line tool that turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface.
+`tpms` turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface. There is a command-line tool, `tpms`, and a desktop app with a live 3D preview, `tpms-gui`.
 
-**Status: v1.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path).
+**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option.
+
+![tpms-gui](docs/gui.png)
+
+## GUI
+
+Run `build/tpms-gui`.
+
+- **Left panel:** every option of the command line, grouped as Surface, Box and Export. Options that do not apply to the chosen output file are hidden: mesh resolution for STEP, patches and tolerance for STL.
+- **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread; it uses a coarser mesh than the export (up to 20 steps per cell). The line above the view gives the triangle count, solids, solid fraction and dropped pieces. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
+- **Export:** writes the file on a worker thread. The log shows the same report as the command line.
+- **Command line:** the equivalent `tpms` command, with a Copy button. Use it to repeat an export or to script one.
+
+`tpms-gui --screenshot FILE.ppm` renders the default settings once and saves the window as an image (for docs and tests).
 
 ## Build
 
-You need a C++17 compiler and CMake 3.20 or newer. There are no other dependencies. OpenMP is used when the compiler has it.
+You need a C++17 compiler and CMake 3.20 or newer. OpenMP is used when the compiler has it. The command-line tool has no other dependencies.
+
+`tpms-gui` uses Dear ImGui 1.91.5 and GLFW 3.4. CMake downloads them at configure time (pinned versions, SHA-256 checked). Turn the GUI off with `-DTPMS_GUI=OFF` to build only the command-line tool without downloads.
 
 ```bash
 cmake -S . -B build -G Ninja
@@ -157,5 +172,6 @@ Merged files have fewer faces but can be larger: each merged face is a dense con
 - **v1 (done):** smooth STEP with B-spline faces, error checked against the exact implicit function, shared boundary curves.
 - **v1 merged faces (done):** 3–8 times fewer faces through trimmed height-field regions.
 - **Next for v1:** test import in NX; fix merged Neovius sheets; smaller merged files (adaptive knots); inner cavities (`BREP_WITH_VOIDS`).
-- **v2:** GUI with live preview, graded density and cell size.
+- **v2 (done):** GUI with every command-line option and a live preview.
+- **Next:** graded density and cell size.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.
