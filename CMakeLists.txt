@@ -72,6 +72,9 @@ enable_testing()
 foreach(t gyroid schwarz-p diamond iwp frd fischer-koch-s neovius)
   add_test(NAME smooth-${t} COMMAND tpms --type ${t} --cells 1 -o ${CMAKE_BINARY_DIR}/test-${t}.step)
 endforeach()
+# Smooth STEP of the curved shapes: seams welded, curved caps, merged faces.
+add_test(NAME smooth-tube COMMAND tpms --shape tube --radius 10 20 --height 10 --cells 1 6 1 -o ${CMAKE_BINARY_DIR}/test-tube.step)
+add_test(NAME smooth-torus-shell COMMAND tpms --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4 -o ${CMAKE_BINARY_DIR}/test-torus-shell.step)
 # Every shape as a closed STL mesh (exit 1 if not closed, 2 if empty).
 add_test(NAME shape-tube COMMAND tpms --shape tube --radius 10 20 --height 20 --cells 1 8 2 --res 12 -o ${CMAKE_BINARY_DIR}/test-tube.stl)
 add_test(NAME shape-torus-shell COMMAND tpms --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4 --res 10 -o ${CMAKE_BINARY_DIR}/test-torus-shell.stl)

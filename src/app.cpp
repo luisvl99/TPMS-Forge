@@ -194,7 +194,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
     };
     // A point and normal in grid space, mapped to mm.
     auto emit = [&](Vec3 q, Vec3 n) {
-        if (shape.conformal()) n = shape.normal(q, n), q = shape.map(q);
+        if (shape.conformal()) n = shape.gradient(q, n), q = shape.map(q);
         emitMm(q, n);
     };
     // The part of a triangle where g < 0, with interpolated normals.
@@ -233,7 +233,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
             normals.push_back(gradient(openField, v));
             if (!shape.conformal()) continue;
             mm.push_back(shape.map(v));
-            mm.push_back(shape.normal(v, normals.back()));
+            mm.push_back(shape.gradient(v, normals.back()));
         }
         for (const auto& t : m.triangles) {
             const Vec3 q[3] = {m.vertices[t[0]], m.vertices[t[1]], m.vertices[t[2]]};
@@ -462,8 +462,7 @@ Settings fromOptions(const Options& o) {
         s.r0 = float(o.shape.r0), s.r1 = float(o.shape.r1), s.height = float(o.shape.height);
         s.major = float(o.shape.major), s.radial = o.shape.logRadial ? 0 : 1;
     }
-    const double autoTol = 0.001 * std::min({o.cell[0], o.cell[1], o.cell[2]});
-    s.tol = std::fabs(o.tol - autoTol) < 1e-12 ? 0 : float(o.tol);
+    s.tol = std::fabs(o.tol - autoTol(o)) < 1e-12 ? 0 : float(o.tol);
     s.patches = o.patches, s.exact = o.exact, s.faceted = o.faceted, s.res = o.res;
     s.minFragment = float(o.minFragment);
     if (!o.outputs.empty()) std::snprintf(s.out, sizeof s.out, "%s", o.outputs[0].c_str());
@@ -616,6 +615,7 @@ int main(int argc, char** argv) {
             ImGui::SetTooltip("Drop pieces smaller than this fraction of the largest piece (cut off by the shape).");
 
         ImGui::SeparatorText("Export");
+        const bool trimmed = s.shape == kCylinder || s.shape == kSphere || s.shape == kTorus;
         ImGui::InputText("##file", s.out, sizeof s.out);
 #ifdef _WIN32
         ImGui::SameLine();
@@ -627,15 +627,15 @@ int main(int argc, char** argv) {
             ImGui::Checkbox("Faceted (one face per triangle)", &s.faceted);
             if (s.faceted) {
                 ImGui::InputInt("Mesh steps per cell", &s.res);
-            } else if (s.shape != kBox) {
+            } else if (trimmed) {
                 ImGui::PushTextWrapPos(0);
-                ImGui::TextColored({1, 0.6f, 0.4f, 1}, "Smooth STEP works for the box only so far: tick Faceted or "
-                                                       "export .stl.");
+                ImGui::TextColored({1, 0.6f, 0.4f, 1}, "Smooth STEP works for the box, tube and torus shell only: "
+                                                       "tick Faceted or export .stl.");
                 ImGui::PopTextWrapPos();
             } else {
                 ImGui::InputInt("Start patches per cell", &s.patches);
                 ImGui::InputFloat("Tolerance (mm)", &s.tol, 0, 0, s.tol > 0 ? "%.4f" : "%.0f (auto)");
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = auto: 0.001 x the cell size.");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = auto: 0.001 x the smallest cell edge.");
                 ImGui::Checkbox("Exact edges (more faces)", &s.exact);
             }
         }
@@ -643,7 +643,7 @@ int main(int argc, char** argv) {
 
         const std::vector<std::string> args = exportArgs(s);
         const bool exporting = exportJob.valid();
-        const bool unsupported = s.shape != kBox && !isStl(s.out) && !s.faceted;
+        const bool unsupported = trimmed && !isStl(s.out) && !s.faceted;
         ImGui::BeginDisabled(exporting || !shown.error.empty() || unsupported);
         if (ImGui::Button(exporting ? "Exporting..." : "Export", {-1, 0})) {
             {

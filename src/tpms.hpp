@@ -130,14 +130,57 @@ struct Shape {
         return kind == ShapeKind::Tube ? 2 : kind == ShapeKind::TorusShell ? 6 : 0;
     }
 
+    // Conformal: radius in mm at radial parameter u (cell units).
+    double radius(double u) const {
+        const double t = u / cells[0];
+        return logRadial ? r0 * std::pow(r1 / r0, t) : r0 + (r1 - r0) * t;
+    }
+
     // Conformal: parameter point (cell units) to mm. Orientation preserving.
     Vec3 map(Vec3 p) const {
-        const double t = p.x / cells[0];
-        const double r = logRadial ? r0 * std::pow(r1 / r0, t) : r0 + (r1 - r0) * t;
-        const double a = kTwoPi * p.y / cells[1];
+        const double r = radius(p.x), a = kTwoPi * p.y / cells[1];
         if (kind == ShapeKind::Tube) return {r * std::cos(a), r * std::sin(a), height * (p.z / cells[2] - 0.5)};
         const double b = kTwoPi * p.z / cells[2], d = major + r * std::cos(b);
         return {d * std::cos(a), d * std::sin(a), r * std::sin(b)};
+    }
+
+    // Conformal: inverse of map(). Angles come back in [0, 2 pi).
+    Vec3 unmap(Vec3 q) const {
+        auto turn = [](double angle) { return (angle < 0 ? angle + kTwoPi : angle) / kTwoPi; };
+        double r;
+        Vec3 p;
+        p.y = turn(std::atan2(q.y, q.x)) * cells[1];
+        if (kind == ShapeKind::Tube) {
+            r = std::hypot(q.x, q.y);
+            p.z = (q.z / height + 0.5) * cells[2];
+        } else {
+            const double d = std::hypot(q.x, q.y) - major;
+            r = std::hypot(d, q.z);
+            p.z = turn(std::atan2(q.z, d)) * cells[2];
+        }
+        p.x = (logRadial ? std::log(r / r0) / std::log(r1 / r0) : (r - r0) / (r1 - r0)) * cells[0];
+        return p;
+    }
+
+    // Phi(p) with dPhi/dp.x = det J and Phi = 0 at p.x = 0. The flux
+    // (Phi, 0, 0) has divergence det J, so a closed surface in the parameter
+    // box encloses the mm volume of the flux through it. Box: the parameter
+    // box is the part in mm, Phi = p.x.
+    double flux(Vec3 p) const {
+        if (!conformal()) return p.x;
+        const double pi = 0.5 * kTwoPi, r = radius(p.x);
+        if (kind == ShapeKind::Tube) return pi * height / (cells[1] * cells[2]) * (r * r - r0 * r0);
+        const double b = kTwoPi * p.z / cells[2];
+        return 4 * pi * pi / (cells[1] * cells[2]) *
+               (major * (r * r - r0 * r0) / 2 + std::cos(b) * (r * r * r - r0 * r0 * r0) / 3);
+    }
+
+    // Conformal: the smallest cell edge in mm (radial at r0; around at r0
+    // for the tube and the torus shell's tube, at major - r1 for its ring).
+    double minCell() const {
+        const double radial = radius(1) - r0;
+        if (kind == ShapeKind::Tube) return std::min({radial, kTwoPi * r0 / cells[1], height / cells[2]});
+        return std::min({radial, kTwoPi * (major - r1) / cells[1], kTwoPi * r0 / cells[2]});
     }
 
     // Conformal: columns of the Jacobian of map() at p.
@@ -150,12 +193,13 @@ struct Shape {
         }
     }
 
-    // Conformal: a field gradient in parameter space as a direction in mm
-    // (J^-T g, up to the positive factor 1 / det J).
-    Vec3 normal(Vec3 p, Vec3 g) const {
+    // Conformal: a field gradient g in parameter space as the gradient in mm,
+    // J^-T g.
+    Vec3 gradient(Vec3 p, Vec3 g) const {
         Vec3 J[3];
         jacobian(p, J);
-        return cross(J[1], J[2]) * g.x + cross(J[2], J[0]) * g.y + cross(J[0], J[1]) * g.z;
+        const Vec3 c = cross(J[1], J[2]) * g.x + cross(J[2], J[0]) * g.y + cross(J[0], J[1]) * g.z;
+        return c * (1.0 / dot(J[0], cross(J[1], J[2])));
     }
 
     // Trimmed: half extents, and a function that is negative inside.

@@ -25,7 +25,7 @@ struct Options {
     Shape shape;
     int res = 24;
     int patches = 3;
-    double tol = 0;  // 0: 0.001 x smallest cell size
+    double tol = 0;  // 0: autoTol()
     bool faceted = false;
     bool exact = false;
     double minFragment = 0.01;
@@ -34,6 +34,9 @@ struct Options {
 
 // Parses and checks arguments (without the program name).
 bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& error);
+
+// Default --tol: 0.001 x the smallest cell edge in mm.
+double autoTol(const Options& o);
 
 // The lattice the options describe; solves the iso level for --density.
 Lattice makeLattice(const Options& o);

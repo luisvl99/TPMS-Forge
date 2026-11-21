@@ -2,7 +2,7 @@
 
 `tpms` turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface. There is a command-line tool, `tpms`, and a desktop app with a live 3D preview, `tpms-gui`.
 
-**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube or torus shell with cells that follow the curvature, or a cylinder, sphere or torus cut from a straight lattice (STL and faceted STEP so far).
+**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube or torus shell with cells that follow the curvature (smooth STEP too), or a cylinder, sphere or torus cut from a straight lattice (STL and faceted STEP so far).
 
 ![tpms-gui](docs/gui.png)
 
@@ -91,18 +91,18 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 - **Trimmed** (cylinder, sphere, torus): a straight lattice of `--cell` cells, cut by the shape. Use this for solid shapes: bending cells around an axis or a pole would squeeze them to nothing there.
 - Round shapes are centered at the origin with their axis along z.
 - Bending stretches cells, and stretched walls are thicker, so the solid fraction differs from `--density` (which is per unit cell). The tool samples the field and prints the real value.
-- Smooth STEP works for the box only so far. Use `.stl` or `--faceted` for the other shapes.
+- Smooth STEP works for the box, tube and torus shell. The faces where the lattice is cut are exact: cylinders and end planes for the tube, tori for the torus shell. For the trimmed shapes, use `.stl` or `--faceted` (or cut a box lattice in CAD).
 
 Example: a gyroid tube, 15 to 25 mm radius, 30 mm long, 12 cells around:
 
 ```bash
-build/tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.stl
+build/tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.step
 ```
 
 ## STEP options
 
 - `--patches N` is the patch grid steps per unit cell edge to start from (default 3). Each step gives about one B-spline face per wall crossing. If the result fails a check, the tool tries N+1, N+2, … (up to 16, or N+7 if larger) and prints the value it used. FRD and Fischer-Koch S sheets need 8–11.
-- `--tol T` is the max distance in mm between a face and the exact surface (default 0.001 × cell size).
+- `--tol T` is the max distance in mm between a face and the exact surface (default 0.001 × the smallest cell edge; for a tube or torus shell, the smallest bent cell).
 - `--exact` keeps one face per patch. Neighbor faces then share their edges exactly. Without it (the default), patches are merged into large trimmed faces, which gives 3–8 times fewer faces. Their edges lie within `--tol` of the faces instead of exactly on them (tolerant edges, as in most industrial STEP files).
 - `--faceted` writes the v0 STEP (one planar face per triangle) instead.
 
@@ -136,6 +136,19 @@ Results for 2 x 2 x 2 cells at density 0.3 (sheet and network, solid and void):
 
 - With `--exact`, all 7 surface types read as valid closed solids. The volumes match the solid fraction the tool prints within 0.0003.
 - With merged faces (default), 26 of 28 cases are valid. The Neovius sheet fails: about 30 faces along the box faces get edges that OpenCASCADE splits on reading. Use `--exact` for Neovius sheets until this is fixed.
+
+Curved shapes at density 0.3, merged faces: a tube (radius 10 to 20 mm, 10 mm long, 1 x 6 x 1 cells; all 28 cases) and a torus shell (radius 4 to 10 mm, major radius 25 mm, 1 x 12 x 4 cells; sheet solid and network void of each type):
+
+- Everything reads as valid closed solids except the Neovius sheets, as in the box. The volumes match the solid fraction the tool prints: for the gyroid sheet tube, solid 2 817.5 mm³ + void 6 607.3 mm³ = 9 424.8 mm³ = π (20² − 10²) × 10.
+- The Neovius network at this density is isolated blobs, so its void part has inner cavities. The tool drops them with a warning, as in the box.
+
+| Faces, merged (`--exact`) | tube, 1 x 6 x 1 cells | torus shell, 1 x 12 x 4 cells |
+|---|---|---|
+| gyroid sheet | 354 (1 262) | 3 302 (8 582) |
+| Schwarz P sheet | 189 (952) | 1 739 (6 880) |
+| FRD sheet | 1 637 (10 578) | 13 354 (80 868) |
+
+A torus shell takes 10–160 s, most of it in merging.
 
 | Faces, 2 x 2 x 2 cells, density 0.3 | `--exact` | merged |
 |---|---|---|
@@ -172,7 +185,7 @@ Merged files have fewer faces but can be larger: each merged face is a dense con
 5. Fill each quad with a Coons grid, project it onto the surface, and interpolate it with a bicubic B-spline. The boundary rows of the control net equal the edge curve, so neighbor faces meet exactly and no sewing is needed.
 6. Check the distance of each face from the exact surface at the middle of every sample cell. Double the samples (4, 8, 16, 32) until it is below `--tol`.
 7. Close the solid on each box face with planar faces. Their loops are the wall boundary curves plus the inside parts of the box edges.
-8. Check the result: every edge is used by exactly two faces in opposite directions, all corners converged, and the enclosed volume matches a quasi-random sample of the field within 2 % of the box. If a check fails, the patch grid is too coarse for some feature, so the tool tries the next `--patches` value.
+8. Check the result: every edge is used by exactly two faces in opposite directions, all corners converged, and the enclosed volume matches a quasi-random sample of the field within 2 % of the shape volume. If a check fails, the patch grid is too coarse for some feature, so the tool tries the next `--patches` value.
 9. Merge patches into large faces (skipped with `--exact`):
    - Group neighbor patches of one wall into regions. The tool keeps merging the pair with the narrowest combined normal cone, while all normals stay within 82° of the region's mean normal. A region is then a height field over the plane normal to that mean.
    - Fit one bicubic B-spline height field per region by least squares (banded Cholesky), adding control points until every sample is within `tol` / 2. A small second-difference penalty fills the parts of the rectangle outside the region.
@@ -180,6 +193,13 @@ Merged files have fewer faces but can be larger: each merged face is a dense con
    - Join the patch edges between the same two faces into one B-spline curve within `tol` / 4. Chains end at kinks sharper than 30°: one curve cannot follow a corner. Zero-length edges (two corners on one point, e.g. on a mirror plane) are collapsed.
    - The STEP uncertainty is set to `tol`, so readers accept the edge gaps.
 10. Write STEP AP214: `B_SPLINE_SURFACE_WITH_KNOTS` faces, `B_SPLINE_CURVE_WITH_KNOTS` edges, `PLANE` caps with `LINE` edges on the box.
+
+For a tube or torus shell, the same steps run in the parameter box (one unit per cell):
+
+- Corners and samples are projected onto the surface in the parameter box, then mapped to mm. The B-splines are fitted to the mapped samples, and the fit error is measured in mm.
+- The faces where the parameter box wraps around (the seam) get no caps. The field repeats there, so both copies of the seam get the same patches. After fitting, the far copy of every seam vertex and edge is welded to the near one.
+- Caps lie on exact `CYLINDRICAL_SURFACE`s (tube walls), `TOROIDAL_SURFACE`s (torus shell walls) or `PLANE`s (tube ends). Their edges along the shape's box edges (circles and straight lines) are B-spline curves within `tol` / 4, so the STEP uncertainty is `tol`. A curved cap keeps the seam as an edge it uses twice, as CAD seams are. A tube end is joined across the seam into an annulus with holes.
+- Volumes use a flux in the parameter box: Phi(u) with dPhi/du = det J, the volume stretch of the mapping. The flux through the closed patch and cap surfaces is the volume in mm, exact up to the face samples. On the seam the flux is zero, so no cap is needed there.
 
 ### Faceted STEP and STL
 
@@ -198,5 +218,6 @@ Merged files have fewer faces but can be larger: each merged face is a dense con
 - **Next for v1:** test import in NX; fix merged Neovius sheets; smaller merged files (adaptive knots); inner cavities (`BREP_WITH_VOIDS`).
 - **v2 (done):** GUI with every command-line option and a live preview.
 - **Curved shapes, phase 1 (done):** tube and torus shell with cells that follow the shape; trimmed cylinder, sphere and torus; preview, STL and faceted STEP.
-- **Next:** smooth STEP for curved shapes (phase 2); graded density and cell size.
+- **Curved shapes, phase 2 (done):** smooth STEP for the tube and torus shell, with exact cylinder, torus and plane caps.
+- **Next:** faster merge and smaller merged files on curved shapes; graded density and cell size.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.

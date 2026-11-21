@@ -45,11 +45,12 @@ Shape (default box)
                         keeps cells square; linear keeps them equally thick).
   Round shapes are centered at the origin with their axis along z.
 
-STEP (smooth B-spline faces; box only so far)
+STEP (smooth B-spline faces; box, tube and torus-shell)
   --patches N           Patch grid steps per unit cell edge to start from
                         (default 3). The tool steps it up until the geometry
                         is valid and within --tol.
-  --tol T               Max fit error in mm (default 0.001 x cell size).
+  --tol T               Max fit error in mm (default 0.001 x smallest cell
+                        edge).
   --exact               Keep one face per patch, with exactly shared edges.
                         Default: merge patches into large trimmed faces whose
                         edges lie within --tol of the faces.
@@ -228,15 +229,20 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
     if (o.res < 4) return error = "--res must be >= 4", false;
     if (o.patches < 2) return error = "--patches must be >= 2", false;
     if (o.tol < 0) return error = "--tol must be > 0", false;
-    if (o.tol == 0) o.tol = 0.001 * std::min({o.cell[0], o.cell[1], o.cell[2]});
+    if (o.tol == 0) o.tol = autoTol(o);
     for (const auto& out : o.outputs) {
         const std::string e = ext(out);
         if (e != ".step" && e != ".stp" && e != ".stl")
             return error = "output '" + out + "' must end in .step, .stp or .stl", false;
-        if (e != ".stl" && !o.faceted && s.kind != ShapeKind::Box)
-            return error = "smooth STEP supports --shape box only so far: write .stl or add --faceted", false;
+        if (e != ".stl" && !o.faceted && s.trimmed())
+            return error = std::string("smooth STEP does not support --shape ") + shapeName(s.kind) +
+                           " yet: write .stl or add --faceted", false;
     }
     return true;
+}
+
+double autoTol(const Options& o) {
+    return 0.001 * (o.shape.conformal() ? o.shape.minCell() : std::min({o.cell[0], o.cell[1], o.cell[2]}));
 }
 
 Lattice makeLattice(const Options& o) {
@@ -437,7 +443,8 @@ int run(const std::vector<std::string>& args, const Print& print) {
             continue;
         }
         const SmoothReport r =
-            writeSmoothStep(out, p.stem().string(), lat, cells, o.patches, o.tol, o.minFragment, o.exact);
+            writeSmoothStep(out, p.stem().string(), lat, cells, o.patches, o.tol, o.minFragment, o.exact,
+                            expected * shapeVol, shapeVol);
         if (!r.error.empty()) {
             say(print, "error: %s: %s at %d patches per cell. Try a higher --patches.", out.c_str(), r.error.c_str(),
                 r.patches);

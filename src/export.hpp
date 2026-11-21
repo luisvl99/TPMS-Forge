@@ -28,12 +28,16 @@ struct SmoothReport {
     std::string error;    // empty on success
 };
 
-// Smooth STEP AP214: bicubic B-spline faces, planar caps on the box faces.
-// `patches` = first patch grid steps per unit cell edge to try. Doubles the
-// samples per patch until the fit error is below `tol` (mm). Then merges the
-// patches into large trimmed faces with edges within `tol`, unless `exact`.
+// Smooth STEP AP214 of a box, tube or torus shell: bicubic B-spline faces,
+// caps on the shape's faces (planes, cylinders, tori). `patches` = first
+// patch grid steps per unit cell edge to try. Doubles the samples per patch
+// until the fit error is below `tol` (mm). Then merges the patches into large
+// trimmed faces with edges within `tol`, unless `exact`. `fieldVolume` (mm^3,
+// from samples of the field) checks the result against folded patches; it
+// must match within 2% of `shapeVolume`.
 SmoothReport writeSmoothStep(const std::string& path, const std::string& name, const Lattice& lat,
-                             const int cells[3], int patches, double tol, double minFragment, bool exact);
+                             const int cells[3], int patches, double tol, double minFragment, bool exact,
+                             double fieldVolume, double shapeVolume);
 
 // Minimal ISO 10303-21 writer shared by both STEP writers.
 class StepFile {
