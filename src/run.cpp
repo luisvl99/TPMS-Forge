@@ -3,6 +3,7 @@
 #include "export.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -38,6 +39,12 @@ Shape (default box)
   --shape NAME          box | tube | torus-shell   (cells follow the shape)
                         cylinder | sphere | torus  (straight cells, trimmed)
   --cell L [Ly Lz]      Unit cell size in mm (box and trimmed; default 10).
+  --unit-cell           box: a periodic cell for homogenization (RVE).
+                        --cells defaults to 1; opposite faces match exactly;
+                        edges are exact and every piece is kept (small ones
+                        connect to the next cell). No grading.
+  --shift S [Sy Sz]     Offset of the lattice in cells (default 0): moves
+                        where the faces of the shape cut the cells.
   --cell-grade x|y|z L1 box: the cell length along that axis changes
                         linearly from --cell (start) to L1 mm (end).
   --cells N [Ny Nz]     Cell counts (default 2).
@@ -128,6 +135,25 @@ void say(const Print& print, const char* fmt, ...) {
     print(buf);
 }
 
+// The first axis whose opposite faces of the box [0, L] differ in a mesh,
+// or -1: the mesh points on face 0, and on face L moved by -L, must be the
+// same set.
+int unmatchedFaces(const Mesh& m, const double L[3]) {
+    for (int a = 0; a < 3; ++a) {
+        const int u = (a + 1) % 3, v = (a + 2) % 3;
+        std::vector<std::array<double, 2>> near, far;
+        for (const Vec3& p : m.vertices) {
+            if (std::fabs(p[a]) < 1e-9 * L[a]) near.push_back({p[u], p[v]});
+            else if (std::fabs(p[a] - L[a]) < 1e-9 * L[a]) far.push_back({p[u], p[v]});
+        }
+        std::sort(near.begin(), near.end()), std::sort(far.begin(), far.end());
+        if (near.size() != far.size()) return a;
+        for (size_t k = 0; k < near.size(); ++k)
+            if (std::fabs(near[k][0] - far[k][0]) + std::fabs(near[k][1] - far[k][1]) > 1e-9 * (L[u] + L[v])) return a;
+    }
+    return -1;
+}
+
 }  // namespace
 
 const char* shapeName(ShapeKind k) {
@@ -173,6 +199,12 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
             i += 2;
         } else if (a == "--report") {
             o.report = true;
+        } else if (a == "--unit-cell") {
+            o.unitCell = true;
+        } else if (a == "--shift") {
+            n = numbers(args, i, o.shift, 3);
+            if (n != 1 && n != 3) return error = "--shift needs 1 or 3 numbers", false;
+            if (n == 1) o.shift[1] = o.shift[2] = o.shift[0];
         } else if (a == "--shape" && hasValue) {
             const std::string k = lower(args[++i]);
             const auto it = std::find_if(std::begin(kShapes), std::end(kShapes), [&](const ShapeName& s) { return k == s.name; });
@@ -236,6 +268,13 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
     const std::string name = shapeName(s.kind);
     if (s.bent() && cellGiven) return error = "--cell does not apply to --shape " + name + ": set --cells", false;
     if (s.cellGrade >= 0 && s.kind != ShapeKind::Box) return error = "--cell-grade works for the box only", false;
+    if (o.unitCell) {
+        if (s.kind != ShapeKind::Box) return error = "--unit-cell works for the box only", false;
+        if (o.graded || s.cellGrade >= 0) return error = "--unit-cell needs a lattice without grading", false;
+        if (!cellsGiven) cells[0] = cells[1] = cells[2] = 1;
+        o.exact = true;      // merged faces on opposite sides would differ within --tol
+        o.minFragment = 0;   // a piece cut off here continues in the next cell
+    }
     if (s.cellGrade >= 0 && !(s.cellEnd > 0)) return error = "--cell-grade needs a cell length > 0", false;
     if (s.trimmed() && cellsGiven) return error = "--cells does not apply to --shape " + name + ": set --cell", false;
     if (s.kind == ShapeKind::Box && (radii || s.height || s.major))
@@ -284,7 +323,7 @@ Lattice makeLattice(const Options& o) {
     lat.form = o.form;
     lat.part = o.part;
     lat.shape = o.shape;
-    for (int a = 0; a < 3; ++a) lat.cell[a] = o.shape.mapped() ? 1 : o.cell[a];
+    for (int a = 0; a < 3; ++a) lat.cell[a] = o.shape.mapped() ? 1 : o.cell[a], lat.shift[a] = o.shift[a];
     // Iso level at t = 0 (start of a grading) to 1 (end): linear in the
     // density (through the cell's quantiles), or in the level itself.
     const std::vector<double> values = o.hasLevel ? std::vector<double>{} : cellValues(surface->f, o.form);
@@ -439,6 +478,7 @@ int run(const std::vector<std::string>& args, const Print& print) {
     case ShapeKind::Box:
         say(print, "Box       : %g x %g x %g mm (%d x %d x %d cells of %g x %g x %g mm)", s.boxPos(0, cells[0]),
             s.boxPos(1, cells[1]), s.boxPos(2, cells[2]), cells[0], cells[1], cells[2], o.cell[0], o.cell[1], o.cell[2]);
+        if (o.unitCell) say(print, "Unit cell : periodic; exact edges, every piece kept");
         if (s.cellGrade >= 0)
             say(print, "Cell size : along %c from %g to %g mm (graded)", kAxes[s.cellGrade], o.cell[s.cellGrade],
                 s.cellEnd);
@@ -465,8 +505,16 @@ int run(const std::vector<std::string>& args, const Print& print) {
         say(print, "note: the field gives solid fraction %.4f here, not %.3f: the shape bends or cuts the cells.",
             solidFraction(expected), o.density);
 
+    if (o.shift[0] || o.shift[1] || o.shift[2])
+        say(print, "Shift     : %g x %g x %g cells", o.shift[0], o.shift[1], o.shift[2]);
     const auto t0 = std::chrono::steady_clock::now();
     bool ok = true;
+    if (o.unitCell) {  // self-check: opposite faces must match
+        const double L[3] = {cells[0] * o.cell[0], cells[1] * o.cell[1], cells[2] * o.cell[2]};
+        const int bad = unmatchedFaces(meshSolid(o, lat, o.res), L);
+        if (bad < 0) say(print, "Periodic  : opposite faces match");
+        else say(print, "error: the faces across %c do not match", kAxes[bad]), ok = false;
+    }
     Pieces mesh;
     if (needMesh) {
         size_t degenerate = 0;

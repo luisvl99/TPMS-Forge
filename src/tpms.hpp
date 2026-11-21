@@ -286,6 +286,7 @@ struct Lattice {
     Part part = Part::Solid;
     double level = 0.0;               // iso level c (graded: at the start)
     double cell[3] = {10, 10, 10};    // unit cell size per axis: mm, or 1 in a parameter box
+    double shift[3] = {0, 0, 0};      // offset of the lattice, in cells
     Shape shape;                      // trimmed shapes cut the field
     // Graded: c along lattice axis `grade`, from coordinate gradeFrom to
     // gradeTo, as evenly spaced values (linear in between).
@@ -293,9 +294,18 @@ struct Lattice {
     double gradeFrom = 0, gradeTo = 1;
     std::vector<double> levels;
 
-    // Surface function f at a point.
+    // Surface function f at a point. The phase (in cells) is reduced to one
+    // cell, and points within 1e-12 of a cell boundary are put on it, so a
+    // point and its copy one cell over give the same value bit for bit:
+    // opposite faces of a cell match exactly.
     double value(double x, double y, double z) const {
-        return f(kTwoPi * x / cell[0], kTwoPi * y / cell[1], kTwoPi * z / cell[2]);
+        auto phase = [](double u, double offset) {
+            const double k = std::round(u);
+            if (std::fabs(u - k) < 1e-12) u = k;
+            u = u - std::floor(u) + offset;  // offset after the reduction, so copies stay identical
+            return kTwoPi * (u - std::floor(u));
+        };
+        return f(phase(x / cell[0], shift[0]), phase(y / cell[1], shift[1]), phase(z / cell[2], shift[2]));
     }
 
     // Iso level c at a point.

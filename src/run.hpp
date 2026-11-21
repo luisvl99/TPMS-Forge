@@ -33,7 +33,9 @@ struct Options {
     bool exact = false;
     double minFragment = 0.01;
     std::vector<std::string> outputs;
-    bool report = false;  // print the property report
+    bool report = false;    // print the property report
+    bool unitCell = false;  // box: a periodic cell (exact edges, every piece kept)
+    double shift[3] = {0, 0, 0};  // offset of the lattice, in cells
 };
 
 // The --shape name of a shape kind.
@@ -84,6 +86,8 @@ struct Report {
     std::vector<std::pair<std::string, std::string>> opposite;  // pairs of opposite faces of the shape
 };
 Report makeReport(const Options& o, const Lattice& lat, int res);
+// The report as (label, value) rows, for the command line and the GUI.
+std::vector<std::pair<std::string, std::string>> reportRows(const Report& r, const Options& o);
 void printReport(const Report& r, const Options& o, const Print& print);
 bool writeReportJson(const std::string& path, const Report& r, const Options& o, const Lattice& lat);
 

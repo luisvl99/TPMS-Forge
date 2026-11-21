@@ -51,6 +51,8 @@ struct Settings {
     bool cellGraded = false;  // box: the cell length changes along axis `cellGrade`
     int cellGrade = 0;
     float cellEnd = 20;
+    bool unitCell = false;      // box: a periodic cell for homogenization
+    float shift[3] = {0, 0, 0};  // offset of the lattice, in cells
     int shape = kBox;
     bool cubic = true;
     float cell[3] = {10, 10, 10};
@@ -105,13 +107,20 @@ std::vector<std::string> geometryArgs(const Settings& s) {
         for (int k = 0; k < (s.cubic ? 1 : 3); ++k) a.push_back(num(s.cell[k]));
     }
     if (s.shape == kBox && s.cellGraded) a.insert(a.end(), {"--cell-grade", axes[s.cellGrade], num(s.cellEnd)});
+    if (s.shape == kBox && s.unitCell) a.push_back("--unit-cell");
+    if (s.shift[0] || s.shift[1] || s.shift[2]) {
+        a.push_back("--shift");
+        const bool same = s.shift[0] == s.shift[1] && s.shift[1] == s.shift[2];
+        for (int k = 0; k < (same ? 1 : 3); ++k) a.push_back(num(s.shift[k]));
+    }
     if (s.shape <= kTorusShell) {
         a.push_back("--cells");
         const bool same = s.cells[0] == s.cells[1] && s.cells[1] == s.cells[2];
         for (int k = 0; k < (same ? 1 : 3); ++k) a.push_back(std::to_string(s.cells[k]));
     }
     if ((s.shape == kTube || s.shape == kTorusShell) && s.radial) a.insert(a.end(), {"--radial", "linear"});
-    if (s.minFragment != 0.01f) a.insert(a.end(), {"--min-fragment", num(s.minFragment)});
+    const bool unitCell = s.shape == kBox && s.unitCell;  // implies --exact and --min-fragment 0
+    if (s.minFragment != 0.01f && !unitCell) a.insert(a.end(), {"--min-fragment", num(s.minFragment)});
     return a;
 }
 
@@ -127,7 +136,7 @@ std::vector<std::string> exportArgs(const Settings& s) {
         else {
             if (s.patches != 3) a.insert(a.end(), {"--patches", std::to_string(s.patches)});
             if (s.tol > 0) a.insert(a.end(), {"--tol", num(s.tol)});
-            if (s.exact) a.push_back("--exact");
+            if (s.exact && !(s.shape == kBox && s.unitCell)) a.push_back("--exact");
         }
     }
     a.insert(a.end(), {"-o", s.out});
@@ -140,21 +149,42 @@ std::string commandLine(const std::vector<std::string>& args) {
     return c;
 }
 
-bool saveDialog(char* path, size_t size) {
+bool saveDialog(char* path, size_t size, bool json = false) {
 #ifdef _WIN32
     OPENFILENAMEA ofn{};
     ofn.lStructSize = sizeof ofn;
-    ofn.lpstrFilter = "STEP (*.step)\0*.step;*.stp\0STL (*.stl)\0*.stl\0";
-    ofn.nFilterIndex = isStl(path) ? 2 : 1;
+    ofn.lpstrFilter = json ? "JSON (*.json)\0*.json\0" : "STEP (*.step)\0*.step;*.stp\0STL (*.stl)\0*.stl\0";
+    ofn.nFilterIndex = !json && isStl(path) ? 2 : 1;
     ofn.lpstrFile = path;
     ofn.nMaxFile = DWORD(size);
-    ofn.lpstrDefExt = "step";
+    ofn.lpstrDefExt = json ? "json" : "step";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
     return GetSaveFileNameA(&ofn);
 #else
-    (void)path, (void)size;
+    (void)path, (void)size, (void)json;
     return false;
 #endif
+}
+
+// Property report, computed on a worker thread and shown in its own window.
+struct ReportView {
+    std::string title, error;
+    std::vector<std::pair<std::string, std::string>> rows;
+    Report report;
+    Options options;
+    Lattice lattice;
+};
+
+ReportView buildReport(const std::vector<std::string>& args) {
+    ReportView v;
+    if (!parseArgs(args, v.options, v.error)) return v;
+    const Options& o = v.options;
+    v.lattice = makeLattice(o);
+    v.report = makeReport(o, v.lattice, o.res);
+    v.rows = reportRows(v.report, o);
+    v.title = findSurface(o.type)->name + (o.form == Form::Sheet ? " sheet" : " network") + ", " +
+              shapeName(o.shape.kind);
+    return v;
 }
 
 // Preview: the walls and the cut faces, built on a worker thread.
@@ -482,6 +512,9 @@ Settings fromOptions(const Options& o) {
     if (o.graded) s.density1 = float(o.density1), s.level1 = float(o.level1);
     s.cellGraded = o.shape.cellGrade >= 0;
     if (s.cellGraded) s.cellGrade = o.shape.cellGrade, s.cellEnd = float(o.shape.cellEnd);
+    s.unitCell = o.unitCell;
+    if (o.unitCell) s.exact = false, s.minFragment = 0.01f;  // implied by the unit cell, not chosen
+    for (int a = 0; a < 3; ++a) s.shift[a] = float(o.shift[a]);
     for (int a = 0; a < 3; ++a) s.cell[a] = float(o.cell[a]), s.cells[a] = o.cells[a];
     s.cubic = o.cell[0] == o.cell[1] && o.cell[1] == o.cell[2];
     s.shape = int(o.shape.kind);  // the GUI list follows ShapeKind
@@ -537,6 +570,10 @@ int main(int argc, char** argv) {
     std::string shownKey, wantedKey, lastBox;
     std::future<Preview> previewJob;
     std::future<int> exportJob;
+    std::future<ReportView> reportJob;
+    ReportView report;
+    bool showReport = false;
+    char reportPath[1024] = "report.json";
     std::mutex logMutex;
     std::string log = startError.empty() ? "" : "error: " + startError + "\n", status;
     auto exportStart = std::chrono::steady_clock::now();
@@ -547,7 +584,7 @@ int main(int argc, char** argv) {
     for (const Surface& sf : surfaces()) typeNames.push_back(sf.name.c_str());
 
     while (!glfwWindowShouldClose(window)) {
-        const bool busy = previewJob.valid() || exportJob.valid();
+        const bool busy = previewJob.valid() || exportJob.valid() || reportJob.valid();
         if (busy || screenshot) glfwWaitEventsTimeout(0.05);
         else glfwWaitEventsTimeout(0.5);
 
@@ -573,6 +610,17 @@ int main(int argc, char** argv) {
             std::snprintf(b, sizeof b, rc == 0 ? "Done in %.1f s." : "Failed after %.1f s: see the log.", secs);
             status = b;
         }
+        if (startOptions.report) {  // `tpms-gui ... --report` opens with the report
+            startOptions.report = false;
+            std::vector<std::string> job = geometry;
+            if (s.res != 24) job.insert(job.end(), {"--res", std::to_string(s.res)});
+            reportJob = std::async(std::launch::async, buildReport, job);
+        }
+        if (reportJob.valid() && reportJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            report = reportJob.get();
+            showReport = true;
+            status.clear();
+        }
 
         ImGui_ImplOpenGL2_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -595,7 +643,11 @@ int main(int argc, char** argv) {
         // Numbers are typed, with +/- steps; values are clamped to what tpms accepts.
         if (s.thickness == 0) ImGui::InputFloat("Solid fraction", &s.density, 0.01f, 0.05f, "%.3f");
         else ImGui::InputFloat("Iso level c", &s.level, 0.01f, 0.1f, "%.4f");
+        const bool unitCell = s.shape == kBox && s.unitCell;  // a periodic cell has no grading
+        if (unitCell) s.graded = false, s.cellGraded = false;
+        ImGui::BeginDisabled(unitCell);
         ImGui::Checkbox("Graded", &s.graded);
+        ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("The thickness changes linearly from the value above, at the start of an axis,\n"
                               "to the value below, at its end (linear in the cell count).");
@@ -635,8 +687,15 @@ int main(int argc, char** argv) {
                 ImGui::InputFloat3("Cell size (mm)", s.cell, "%.2f");
             }
             if (s.shape == kBox) {
+                if (ImGui::Checkbox("Unit cell (periodic)", &s.unitCell) && s.unitCell)
+                    s.cells[0] = s.cells[1] = s.cells[2] = 1;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("A periodic cell for FEA homogenization: opposite faces match exactly,\n"
+                                      "edges are exact and every piece is kept. More cells give a supercell.");
                 ImGui::InputInt3("Cells x y z", s.cells);
+                ImGui::BeginDisabled(s.unitCell);
                 ImGui::Checkbox("Graded cell size", &s.cellGraded);
+                ImGui::EndDisabled();
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Along one axis the cell length changes linearly from the cell size above\n"
                                       "(start) to the size below (end); cells stretch along that axis.");
@@ -662,7 +721,13 @@ int main(int argc, char** argv) {
             ImGui::TextDisabled("Cells: %.1f mm radial, %.1f-%.1f ring, %.1f-%.1f tube",
                                 (s.r1 - s.r0) / s.cells[0], tau * (s.major - s.r1) / s.cells[1],
                                 tau * (s.major + s.r1) / s.cells[1], tau * s.r0 / s.cells[2], tau * s.r1 / s.cells[2]);
+        ImGui::InputFloat3("Offset (cells)", s.shift, "%.3f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Moves the lattice, in cells, so the faces of the shape cut it elsewhere.\n"
+                              "For example 0.5 puts a Schwarz P node at the center of a unit cell.");
+        ImGui::BeginDisabled(unitCell);
         ImGui::InputFloat("Min fragment", &s.minFragment, 0.005f, 0.05f, "%.3f");
+        ImGui::EndDisabled();
         s.minFragment = std::clamp(s.minFragment, 0.0f, 1.0f);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Drop pieces smaller than this fraction of the largest piece (cut off by the shape).");
@@ -689,7 +754,10 @@ int main(int argc, char** argv) {
                 ImGui::InputInt("Start patches per cell", &s.patches);
                 ImGui::InputFloat("Tolerance (mm)", &s.tol, 0, 0, s.tol > 0 ? "%.4f" : "%.0f (auto)");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = auto: 0.001 x the smallest cell edge.");
-                ImGui::Checkbox("Exact edges (more faces)", &s.exact);
+                bool exact = s.exact || unitCell;  // a unit cell always has exact edges
+                ImGui::BeginDisabled(unitCell);
+                if (ImGui::Checkbox("Exact edges (more faces)", &exact)) s.exact = exact;
+                ImGui::EndDisabled();
             }
         }
         s.res = std::max(4, s.res), s.patches = std::max(2, s.patches), s.tol = std::max(0.0f, s.tol);
@@ -713,21 +781,22 @@ int main(int argc, char** argv) {
                 });
             });
         };
-        ImGui::BeginDisabled(exporting || !shown.error.empty() || unsupported);
+        const bool reporting = reportJob.valid();
+        ImGui::BeginDisabled(exporting || reporting || !shown.error.empty() || unsupported);
         if (ImGui::Button(exporting ? "Working..." : "Export", {-1, 0})) start(args);
         ImGui::EndDisabled();
-        ImGui::BeginDisabled(exporting || !shown.error.empty());
-        if (ImGui::Button("Property report", {-1, 0})) {
+        ImGui::BeginDisabled(exporting || reporting || !shown.error.empty());
+        if (ImGui::Button(reporting ? "Computing..." : "Property report", {-1, 0})) {
             std::vector<std::string> job = geometryArgs(s);
             if (s.res != 24) job.insert(job.end(), {"--res", std::to_string(s.res)});
-            job.push_back("--report");
-            start(job);
+            exportStart = std::chrono::steady_clock::now();
+            reportJob = std::async(std::launch::async, buildReport, job);
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Solid and fluid volumes, wetted area, hydraulic diameters, wall thickness and\n"
                               "which faces each piece connects, from meshes at %d steps per cell.", s.res);
         ImGui::EndDisabled();
-        if (exporting)
+        if (exporting || reporting)
             ImGui::Text("Working... %.0f s",
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - exportStart).count());
         else if (!status.empty())
@@ -751,6 +820,44 @@ int main(int argc, char** argv) {
         ImGui::EndChild();
         ImGui::PopItemWidth();
         ImGui::End();
+
+        // Property report window: a table, with copy and save as JSON.
+        if (showReport) {
+            ImGui::SetNextWindowSize({620 * scale, 460 * scale}, ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos({panelW + 30 * scale, 50 * scale}, ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Property report", &showReport)) {
+                if (!report.error.empty()) {
+                    ImGui::TextColored({1, 0.5f, 0.4f, 1}, "error: %s", report.error.c_str());
+                } else {
+                    ImGui::TextDisabled("%s", report.title.c_str());
+                    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                                  ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+                    if (ImGui::BeginTable("rows", 2, flags, {0, -ImGui::GetFrameHeightWithSpacing()})) {
+                        ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthFixed, 150 * scale);
+                        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+                        for (const auto& [label, value] : report.rows) {
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::TextUnformatted(label.c_str());
+                            ImGui::TableNextColumn();
+                            ImGui::TextWrapped("%s", value.c_str());
+                        }
+                        ImGui::EndTable();
+                    }
+                    if (ImGui::Button("Copy")) {
+                        std::string text = report.title + "\n";
+                        for (const auto& [label, value] : report.rows) text += label + "\t" + value + "\n";
+                        ImGui::SetClipboardText(text.c_str());
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Save JSON...") && saveDialog(reportPath, sizeof reportPath, true))
+                        status = writeReportJson(reportPath, report.report, report.options, report.lattice)
+                                     ? std::string("Done: wrote ") + reportPath
+                                     : std::string("Failed: cannot write ") + reportPath;
+                }
+            }
+            ImGui::End();
+        }
 
         // 3D view: drag to orbit, right / middle drag to pan, wheel to zoom,
         // double-click to reset.
@@ -781,7 +888,7 @@ int main(int argc, char** argv) {
         drawScene(shown, list, cam, panelPx, 0, fbW - panelPx, fbH);
         glViewport(0, 0, fbW, fbH);
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
-        if (screenshot && ++frames > 3 && !previewJob.valid() && shownKey == wantedKey) {
+        if (screenshot && ++frames > 3 && !previewJob.valid() && !reportJob.valid() && shownKey == wantedKey) {
             savePpm(screenshot, fbW, fbH);
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
@@ -790,6 +897,7 @@ int main(int argc, char** argv) {
 
     if (previewJob.valid()) previewJob.wait();
     if (exportJob.valid()) exportJob.wait();
+    if (reportJob.valid()) reportJob.wait();
     ImGui_ImplOpenGL2_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();

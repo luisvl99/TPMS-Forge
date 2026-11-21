@@ -208,43 +208,58 @@ Report makeReport(const Options& o, const Lattice& lat, int res) {
     return r;
 }
 
-void printReport(const Report& r, const Options& o, const Print& print) {
+std::vector<std::pair<std::string, std::string>> reportRows(const Report& r, const Options& o) {
     const double V = r.shapeVolume, Vs = r.solidVolume, Vf = r.fluidVolume, A = r.wettedArea;
-    say(print, "Properties (from meshes at %d steps per cell; volumes and areas within about 1%%):", r.res);
-    say(print, "  Shape volume      : %.6g mm^3", V);
-    say(print, "  Solid             : %.6g mm^3, solid fraction %.4f, %zu piece(s)", Vs, Vs / V, r.solids.size());
-    say(print, "  Fluid (void)      : %.6g mm^3, porosity %.4f, %zu piece(s)", Vf, Vf / V, r.fluids.size());
-    say(print, "  Wetted area       : %.6g mm^2 (walls between solid and fluid)", A);
-    say(print, "  Specific surface  : %.4g 1/mm = %.4g m^2/m^3 (wetted area / shape volume)", A / V, 1000 * A / V);
-    say(print, "  Cut faces         : %.6g mm^2 (solid on the shape's faces)", r.cutArea);
-    say(print, "  Hydraulic diameter: %.4g mm (4 x fluid volume / wetted area)", 4 * Vf / A);
+    std::vector<std::pair<std::string, std::string>> rows;
+    auto row = [&](const std::string& label, const char* fmt, ...) {
+        char buf[512];
+        va_list ap;
+        va_start(ap, fmt);
+        std::vsnprintf(buf, sizeof buf, fmt, ap);
+        va_end(ap);
+        rows.push_back({label, buf});
+    };
+    row("Shape volume", "%.6g mm^3", V);
+    row("Solid", "%.6g mm^3, solid fraction %.4f, %zu piece(s)", Vs, Vs / V, r.solids.size());
+    row("Fluid (void)", "%.6g mm^3, porosity %.4f, %zu piece(s)", Vf, Vf / V, r.fluids.size());
+    row("Wetted area", "%.6g mm^2 (walls between solid and fluid)", A);
+    row("Specific surface", "%.4g 1/mm = %.4g m^2/m^3 (wetted area / shape volume)", A / V, 1000 * A / V);
+    row("Cut faces", "%.6g mm^2 (solid on the shape's faces)", r.cutArea);
+    row("Hydraulic diameter", "%.4g mm (4 x fluid volume / wetted area)", 4 * Vf / A);
     for (int c = 0; c < r.channels && r.channels == 2; ++c)
-        say(print, "    channel %-6s  : %.6g mm^3, wetted area %.6g mm^2, hydraulic diameter %.4g mm", channelName(c),
+        row(std::string("  channel ") + channelName(c), "%.6g mm^3, wetted area %.6g mm^2, hydraulic diameter %.4g mm",
             r.channelVolume[c], r.channelArea[c], 4 * r.channelVolume[c] / r.channelArea[c]);
     if (o.form == Form::Sheet)
-        say(print, "  Wall thickness    : %.4g mm mean (2 x solid volume / wetted area), %.4g to %.4g mm local",
-            2 * Vs / A, r.thickness[0], r.thickness[1]);
+        row("Wall thickness", "%.4g mm mean (2 x solid volume / wetted area), %.4g to %.4g mm local", 2 * Vs / A,
+            r.thickness[0], r.thickness[1]);
     else
-        say(print, "  Solid size        : %.4g mm (4 x solid volume / wetted area, like a strut diameter)", 4 * Vs / A);
+        row("Solid size", "%.4g mm (4 x solid volume / wetted area, like a strut diameter)", 4 * Vs / A);
     auto list = [&](const char* label, const std::vector<ReportPiece>& ps, bool fluid) {
         for (size_t k = 0; k < ps.size() && k < 6; ++k) {
             const std::string chan = fluid && r.channels == 2 ? std::string(" (") + channelName(ps[k].channel) + ")" : "";
-            say(print, "  %-18s: %.6g mm^3%s, touches %s", k ? "" : label, ps[k].volume, chan.c_str(),
+            row(k ? "" : label, "%.6g mm^3%s, touches %s", ps[k].volume, chan.c_str(),
                 ps[k].faces.empty() ? "no face" : joined(ps[k].faces, " ").c_str());
         }
-        if (ps.size() > 6) say(print, "  %-18s  ... and %zu smaller piece(s)", "", ps.size() - 6);
+        if (ps.size() > 6) row("", "... and %zu smaller piece(s)", ps.size() - 6);
     };
     list("Solid pieces", r.solids, false);
     list("Fluid pieces", r.fluids, true);
     const auto th = through(r);
     for (size_t k = 0; k < th.size(); ++k)
-        say(print, "  %-18s: %s to %s: solid %s, fluid %s", k ? "" : "Connects", r.opposite[k].first.c_str(),
+        row(k ? "" : "Connects", "%s to %s: solid %s, fluid %s", r.opposite[k].first.c_str(),
             r.opposite[k].second.c_str(), th[k].solid ? "yes" : "no",
             th[k].fluid.empty() ? "no" : r.channels == 1 ? "yes" : joined(th[k].fluid, " and ").c_str());
-    if (r.cavities) say(print, "  Cavities          : %zu inner shell(s), not exported", r.cavities);
+    if (r.cavities) row("Cavities", "%zu inner shell(s), not exported", r.cavities);
+    row("Accuracy", "from meshes at %d steps per cell: volumes and areas within about 1%%", r.res);
     if (r.thickness[0] > 0 && r.thickness[0] < r.step)
-        say(print, "note: walls down to %.3g mm are thinner than the mesh step (%.3g mm): piece counts and the solid "
-                   "volume can be off there. Raise --res.", r.thickness[0], r.step);
+        row("Note", "walls down to %.3g mm are thinner than the mesh step (%.3g mm): piece counts and the solid "
+                    "volume can be off there. Raise --res.", r.thickness[0], r.step);
+    return rows;
+}
+
+void printReport(const Report& r, const Options& o, const Print& print) {
+    print("Properties:");
+    for (const auto& [label, value] : reportRows(r, o)) say(print, "  %-18s%s %s", label.c_str(), label.empty() ? " " : ":", value.c_str());
 }
 
 bool writeReportJson(const std::string& path, const Report& r, const Options& o, const Lattice& lat) {

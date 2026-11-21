@@ -13,7 +13,7 @@ Run `build/tpms-gui`.
 - **Left panel:** every option of the command line, grouped as Surface, Shape and Export. Numbers are typed (with − / + buttons) and clamped to valid values. Options that do not apply to the chosen output file are hidden: mesh resolution for STEP, patches and tolerance for STL.
 - **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread in about half a second. Each wall (level set) is meshed on its own, so even very thin sheets show without holes; the cuts on the box faces come from a 2D grid 4 times finer. The line above the view gives the triangle count and the solid fraction (from quasi-random samples of the field, not from the preview mesh). Pieces that the export drops as fragments are still drawn. The solid is gray. The fluid (`--part void`) is blue; the fluid of a sheet is two separate channels, one on each side of the sheet (f > c and f < −c), drawn blue and red. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
 - **Export:** writes the file on a worker thread. The log shows the same report as the command line.
-- **Property report:** volumes, wetted area, hydraulic diameters, wall thickness and connectivity of the solid and the fluid, in the log (see [Property report](#property-report)).
+- **Property report:** volumes, wetted area, hydraulic diameters, wall thickness and connectivity of the solid and the fluid, in a table in its own window, with Copy and Save JSON (see [Property report](#property-report)). `tpms-gui ... --report` opens with it.
 - **Command line:** the equivalent `tpms` command, with a Copy button. Use it to repeat an export or to script one.
 
 `tpms-gui` also takes the `tpms` options, so `tpms-gui --type diamond --density 0.3 -o d.step` (for example a copied command line) opens with those settings. `tpms-gui --screenshot FILE.ppm [options]` renders once the preview is final, saves the window as an image and quits (for docs and tests).
@@ -60,6 +60,12 @@ Graded: solid fraction from 0.1 to 0.4 along x, and cells that grow from 5 to 15
 build/tpms --density 0.1 0.4 --grade x --cell 5 --cells 4 2 2 --cell-grade x 15 -o graded.step
 ```
 
+Unit cell of a Schwarz P network for homogenization, shifted half a cell so a node sits at its center:
+
+```bash
+build/tpms --unit-cell --type schwarz-p --form network --density 0.3 --shift 0.5 -o p_cell.step
+```
+
 Property report of a tube, printed and written as JSON:
 
 ```bash
@@ -96,9 +102,21 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 - Both work with every output, and both can be combined. The tool prints the overall solid fraction the grading gives.
 - Smooth STEP of a cell-graded box is built like the tube: in a box with one unit per cell, mapped to mm. The patches then follow the cells at any size.
 
+## Unit cell
+
+`--unit-cell` writes a periodic cell (RVE) for FEA homogenization with periodic boundary conditions:
+
+- One cell of the box (or `--cells N` for a supercell).
+- Opposite faces match exactly. The surface function reduces its phase to one cell, so a point and its copy one cell over give the same value bit for bit; the B-rep and the mesh follow. The tool checks the mesh points on each pair of faces and fails if they differ.
+- Exact edges (no merging): merged faces on opposite sides would differ within `--tol`.
+- Every piece is kept (`--min-fragment 0`): a small piece cut off at a corner continues in the next cell.
+- No grading.
+
+`--shift S` (or `Sx Sy Sz`, in cells, any shape) moves the lattice, so the faces cut it elsewhere: for example away from thin slivers, or with a node at the center. `python tools/check_step.py --periodic cell.step` compares the faces on opposite sides of a STEP file in OpenCASCADE (area and vertices).
+
 ## Property report
 
-`--report` prints the properties of the solid and the fluid (void), whatever `--part` exports. An output ending in `.json` gets the same report as JSON. The GUI has a Property report button.
+`--report` prints the properties of the solid and the fluid (void), whatever `--part` exports. An output ending in `.json` gets the same report as JSON. The GUI shows it in its own window.
 
 | Value | Meaning |
 |---|---|
@@ -183,23 +201,23 @@ Curved shapes at density 0.3, merged faces: a tube (radius 10 to 20 mm, 10 mm lo
 | Faces, merged (`--exact`) | tube, 1 x 6 x 1 cells | torus shell, 1 x 12 x 4 cells |
 |---|---|---|
 | gyroid sheet | 354 (1 262) | 3 055 (8 582) |
-| Schwarz P sheet | 174 (952) | 1 654 (6 880) |
-| FRD sheet | 1 607 (10 578) | 12 012 (80 868) |
+| Schwarz P sheet | 171 (952) | 1 661 (6 880) |
+| FRD sheet | 1 611 (10 578) | 12 022 (80 868) |
 
 On 20 cores, the gyroid torus shell takes 4 s (49 MB) and the FRD sheet torus shell (80 868 patches) 54 s (205 MB).
 
 | Faces, 2 x 2 x 2 cells, density 0.3 | `--exact` | merged |
 |---|---|---|
-| gyroid sheet / network | 1 518 / 756 | 378 / 180 |
-| Schwarz P sheet / network | 1 176 / 552 | 189 / 144 |
+| gyroid sheet / network | 1 518 / 756 | 375 / 178 |
+| Schwarz P sheet / network | 1 176 / 552 | 179 / 144 |
 | diamond sheet / network | 1 998 / 996 | 714 / 376 |
-| I-WP sheet / network | 4 398 / 642 | 485 / 162 |
-| FRD sheet / network | 13 632 / 2 868 | 1 864 / 1 228 |
-| Fischer-Koch S sheet / network | 2 478 / 4 932 | 2 016 / 984 |
+| I-WP sheet / network | 4 398 / 642 | 475 / 162 |
+| FRD sheet / network | 13 632 / 2 868 | 1 883 / 1 231 |
+| Fischer-Koch S sheet / network | 2 478 / 4 932 | 2 016 / 985 |
 
 | Default run (gyroid sheet, 2 x 2 x 2 cells) | Faces | File | OpenCASCADE read |
 |---|---|---|---|
-| smooth STEP, merged | 373 | 5 MB | 1.6 s |
+| smooth STEP, merged | 371 | 5 MB | 1.6 s |
 | smooth STEP, `--exact` | 1 506 | 5 MB | 2.0 s |
 | `--faceted --res 24` | 261 396 | 196 MB | 117 s |
 
@@ -258,5 +276,6 @@ For a tube or torus shell, the same steps run in the parameter box (one unit per
 - **Curved shapes, phase 1 (done):** tube and torus shell with cells that follow the shape; trimmed cylinder, sphere and torus; preview, STL and faceted STEP.
 - **Curved shapes, phase 2 (done):** smooth STEP for the tube and torus shell, with exact cylinder, torus and plane caps.
 - **Graded lattices and property report (done):** graded solid fraction or level along an axis, graded cell size in a box, and the report.
-- **Next:** CFD domains (skins, inlet and outlet buffers); unit cell export for FEA homogenization; custom formulas and more surfaces.
+- **Unit cell (done):** periodic cells for homogenization, lattice offset.
+- **Next:** CFD domains (skins, inlet and outlet buffers); custom formulas and more surfaces.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.
