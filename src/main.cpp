@@ -37,6 +37,9 @@ STEP (smooth B-spline faces)
                         (default 3). The tool steps it up until the geometry
                         is valid and within --tol.
   --tol T               Max fit error in mm (default 0.001 x cell size).
+  --exact               Keep one face per patch, with exactly shared edges.
+                        Default: merge patches into large trimmed faces whose
+                        edges lie within --tol of the faces.
   --faceted             Write one planar face per triangle instead (v0).
 
 STL and faceted STEP
@@ -69,6 +72,7 @@ struct Options {
     int patches = 3;
     double tol = 0;  // 0 = 0.001 x smallest cell size
     bool faceted = false;
+    bool exact = false;
     double minFragment = 0.01;
     std::vector<std::string> outputs;
 };
@@ -161,6 +165,8 @@ int main(int argc, char** argv) {
         } else if (a == "--tol" && hasValue && number(argv[i + 1], v)) {
             o.tol = v;
             ++i;
+        } else if (a == "--exact") {
+            o.exact = true;
         } else if (a == "--faceted") {
             o.faceted = true;
         } else if (a == "--min-fragment" && hasValue && number(argv[i + 1], v)) {
@@ -277,15 +283,18 @@ int main(int argc, char** argv) {
             wrote(out);
             continue;
         }
-        const SmoothReport r = writeSmoothStep(out, p.stem().string(), lat, cells, o.patches, o.tol, o.minFragment);
+        const SmoothReport r =
+            writeSmoothStep(out, p.stem().string(), lat, cells, o.patches, o.tol, o.minFragment, o.exact);
         if (!r.error.empty()) {
             std::fprintf(stderr, "error: %s: %s at %d patches per cell. Try a higher --patches.\n", out.c_str(),
                          r.error.c_str(), r.patches);
             ok = false;
             continue;
         }
-        std::printf("Smooth    : %d patches per cell, %zu faces, %zu solid(s), solid fraction %.4f\n", r.patches,
-                    r.faces, r.solids, solidFraction(r.volume));
+        std::printf("Smooth    : %d patches per cell, %zu faces%s, %zu solid(s), solid fraction %.4f\n", r.patches,
+                    r.faces, r.merged ? (" (merged from " + std::to_string(r.patchFaces) + ")").c_str() : "",
+                    r.solids, solidFraction(r.volume));
+        if (!r.warning.empty()) std::printf("warning: kept patch faces, merge failed: %s.\n", r.warning.c_str());
         std::printf("Fit error : %.3g mm max (tolerance %.3g mm, %d samples per patch edge)\n", r.maxError, o.tol,
                     r.samples);
         dropped(r.fragments, r.cavities);

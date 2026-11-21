@@ -65,6 +65,7 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 
 - `--patches N` is the patch grid steps per unit cell edge to start from (default 3). Each step gives about one B-spline face per wall crossing. If the result fails a check, the tool tries N+1, N+2, … (up to 16, or N+7 if larger) and prints the value it used. FRD and Fischer-Koch S sheets need 8–11.
 - `--tol T` is the max distance in mm between a face and the exact surface (default 0.001 × cell size).
+- `--exact` keeps one face per patch. Neighbor faces then share their edges exactly. Without it (the default), patches are merged into large trimmed faces, which gives 3–8 times fewer faces. Their edges lie within `--tol` of the faces instead of exactly on them (tolerant edges, as in most industrial STEP files).
 - `--faceted` writes the v0 STEP (one planar face per triangle) instead.
 
 ## What the tool checks
@@ -93,16 +94,32 @@ python -m pip install cadquery-ocp
 python tools/check_step.py lattice.step
 ```
 
-Smooth STEP of all 7 surface types, sheet and network, solid and void, reads as valid closed solids. The volumes match the solid fraction the tool prints within 0.0003.
+Results for 2 x 2 x 2 cells at density 0.3 (sheet and network, solid and void):
+
+- With `--exact`, all 7 surface types read as valid closed solids. The volumes match the solid fraction the tool prints within 0.0003.
+- With merged faces (default), 26 of 28 cases are valid. The Neovius sheet fails: about 30 faces along the box faces get edges that OpenCASCADE splits on reading. Use `--exact` for Neovius sheets until this is fixed.
+
+| Faces, 2 x 2 x 2 cells, density 0.3 | `--exact` | merged |
+|---|---|---|
+| gyroid sheet / network | 1 518 / 756 | 378 / 180 |
+| Schwarz P sheet / network | 1 176 / 552 | 241 / 144 |
+| diamond sheet / network | 1 998 / 996 | 714 / 358 |
+| I-WP sheet / network | 4 398 / 642 | 524 / 162 |
+| FRD sheet / network | 13 632 / 2 868 | 1 894 / 1 228 |
+| Fischer-Koch S sheet / network | 2 478 / 4 932 | 2 016 / 955 |
 
 | Default run (gyroid sheet, 2 x 2 x 2 cells) | Faces | File | OpenCASCADE read |
 |---|---|---|---|
-| smooth STEP | 3 138 | 11 MB | 2 s |
+| smooth STEP, merged | 373 | 10 MB | 1.2 s |
+| smooth STEP, `--exact` | 1 506 | 5 MB | 0.7 s |
 | `--faceted --res 24` | 261 396 | 196 MB | 117 s |
+
+Merged files have fewer faces but can be larger: each merged face is a dense control net (up to 60 x 60 points) over a rectangle that includes the parts outside the face.
 
 ## Notes for NX and simulation
 
-- Smooth STEP size grows with the cell count: about 1.4 MB per gyroid sheet cell at 6 patches. A 4 x 4 x 4 gyroid sheet gives 23 000 faces and 86 MB. FRD and Fischer-Koch S sheets are about 6–10 times larger per cell.
+- Face count and file size grow with the cell count. FRD and Fischer-Koch S need finer patch grids, so they give the most faces per cell.
+- Merged faces are checked at the patch samples and cell mid points only. Between them a steep face can drift up to a few times `--tol`. Use a smaller `--tol` if that matters.
 - For the faceted path, `--res` sets the grid steps per unit cell edge. Triangle count grows with `res²`. Thin sheets need a higher `res`; the density warning tells you when it is too low.
 - Units are mm.
 
@@ -118,7 +135,13 @@ Smooth STEP of all 7 surface types, sheet and network, solid and void, reads as 
 6. Check the distance of each face from the exact surface at the middle of every sample cell. Double the samples (4, 8, 16, 32) until it is below `--tol`.
 7. Close the solid on each box face with planar faces. Their loops are the wall boundary curves plus the inside parts of the box edges.
 8. Check the result: every edge is used by exactly two faces in opposite directions, all corners converged, and the enclosed volume matches a quasi-random sample of the field within 2 % of the box. If a check fails, the patch grid is too coarse for some feature, so the tool tries the next `--patches` value.
-9. Write STEP AP214: `B_SPLINE_SURFACE_WITH_KNOTS` faces, `B_SPLINE_CURVE_WITH_KNOTS` edges, `PLANE` caps with `LINE` edges on the box.
+9. Merge patches into large faces (skipped with `--exact`):
+   - Group neighbor patches of one wall into regions. The tool keeps merging the pair with the narrowest combined normal cone, while all normals stay within 82° of the region's mean normal. A region is then a height field over the plane normal to that mean.
+   - Fit one bicubic B-spline height field per region by least squares (banded Cholesky), adding control points until every sample is within `tol` / 2. A small second-difference penalty fills the parts of the rectangle outside the region.
+   - A region that does not fit is grouped again with a 15° smaller cone. A region fails if it folds over itself, touches itself at a vertex, or has more than one outer loop. A single patch that is too curved for a height field keeps its own surface.
+   - Join the patch edges between the same two faces into one B-spline curve within `tol` / 4. Chains end at kinks sharper than 30°: one curve cannot follow a corner. Zero-length edges (two corners on one point, e.g. on a mirror plane) are collapsed.
+   - The STEP uncertainty is set to `tol`, so readers accept the edge gaps.
+10. Write STEP AP214: `B_SPLINE_SURFACE_WITH_KNOTS` faces, `B_SPLINE_CURVE_WITH_KNOTS` edges, `PLANE` caps with `LINE` edges on the box.
 
 ### Faceted STEP and STL
 
@@ -132,6 +155,7 @@ Smooth STEP of all 7 surface types, sheet and network, solid and void, reads as 
 ## Roadmap
 
 - **v1 (done):** smooth STEP with B-spline faces, error checked against the exact implicit function, shared boundary curves.
-- **Next for v1:** test import in NX; inner cavities (`BREP_WITH_VOIDS`); smaller files by merging quads into larger faces.
+- **v1 merged faces (done):** 3–8 times fewer faces through trimmed height-field regions.
+- **Next for v1:** test import in NX; fix merged Neovius sheets; smaller merged files (adaptive knots); inner cavities (`BREP_WITH_VOIDS`).
 - **v2:** GUI with live preview, graded density and cell size.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.

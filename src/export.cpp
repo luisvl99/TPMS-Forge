@@ -135,7 +135,7 @@ bool writeStep(const std::string& path, const std::vector<Mesh>& parts, const st
 }
 
 bool writeStepFile(const std::string& path, const std::string& name,
-                   const std::function<std::vector<long>(StepFile&)>& solids) {
+                   const std::function<std::vector<long>(StepFile&)>& solids, double uncertainty) {
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return false;
     std::setvbuf(f, nullptr, _IOFBF, 1 << 20);
@@ -157,7 +157,7 @@ bool writeStepFile(const std::string& path, const std::string& name,
     const long mm = st.add("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))");
     const long rad = st.add("(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))");
     const long sr = st.add("(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())");
-    const long unc = st.add("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07)," + ref(mm) +
+    const long unc = st.add("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(" + real(uncertainty) + ")," + ref(mm) +
                             ",'distance_accuracy_value','confusion accuracy')");
     const long ctx = st.add("(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((" +
                             ref(unc) + "))GLOBAL_UNIT_ASSIGNED_CONTEXT((" + ref(mm) + "," + ref(rad) + "," +

@@ -18,6 +18,9 @@ bool writeStep(const std::string& path, const std::vector<Mesh>& parts, const st
 
 struct SmoothReport {
     size_t faces = 0, solids = 0, fragments = 0, cavities = 0;
+    size_t patchFaces = 0;  // faces before merging
+    bool merged = false;    // patches merged into large trimmed faces
+    std::string warning;    // why merging was skipped
     double volume = 0;    // mm^3 of the kept solids
     double maxError = 0;  // max distance of the faces from the exact surface, mm
     int patches = 0;      // patch grid steps per unit cell edge that was used
@@ -25,11 +28,12 @@ struct SmoothReport {
     std::string error;    // empty on success
 };
 
-// Smooth STEP AP214: one bicubic B-spline face per patch, planar caps on the
-// box faces. `patches` = first patch grid steps per unit cell edge to try.
-// Doubles the samples per patch until the fit error is below `tol` (mm).
+// Smooth STEP AP214: bicubic B-spline faces, planar caps on the box faces.
+// `patches` = first patch grid steps per unit cell edge to try. Doubles the
+// samples per patch until the fit error is below `tol` (mm). Then merges the
+// patches into large trimmed faces with edges within `tol`, unless `exact`.
 SmoothReport writeSmoothStep(const std::string& path, const std::string& name, const Lattice& lat,
-                             const int cells[3], int patches, double tol, double minFragment);
+                             const int cells[3], int patches, double tol, double minFragment, bool exact);
 
 // Minimal ISO 10303-21 writer shared by both STEP writers.
 class StepFile {
@@ -51,8 +55,9 @@ std::string refList(const std::vector<long>& ids);
 std::string triple(Vec3 p);
 
 // Writes header, units and product data. `solids` writes the
-// MANIFOLD_SOLID_BREPs and returns their ids.
+// MANIFOLD_SOLID_BREPs and returns their ids. `uncertainty` (mm) is the
+// distance below which the reader treats points as equal.
 bool writeStepFile(const std::string& path, const std::string& name,
-                   const std::function<std::vector<long>(StepFile&)>& solids);
+                   const std::function<std::vector<long>(StepFile&)>& solids, double uncertainty = 1e-7);
 
 }  // namespace tpms
