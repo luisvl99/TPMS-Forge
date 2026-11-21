@@ -6,6 +6,8 @@
 
 ![tpms-gui](docs/gui.png)
 
+The [user guide](docs/tpms-user-guide.pdf) (PDF) shows every capability with pictures and walks through common workflows. Rebuild it after changes with `python tools/user_guide.py` (needs `reportlab` and `pillow`, and a built `tpms-gui` for the screenshots).
+
 ## GUI
 
 Run `build/tpms-gui`.
@@ -13,7 +15,7 @@ Run `build/tpms-gui`.
 - **Left panel:** every option of the command line, grouped as Surface, Shape and Export. Numbers are typed (with − / + buttons) and clamped to valid values. Options that do not apply to the chosen output file are hidden: mesh resolution for STEP, patches and tolerance for STL.
 - **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread in about half a second. Each wall (level set) is meshed on its own, so even very thin sheets show without holes; the cuts on the box faces come from a 2D grid 4 times finer. The line above the view gives the triangle count and the solid fraction (from quasi-random samples of the field, not from the preview mesh). Pieces that the export drops as fragments are still drawn. The solid is gray. The fluid (`--part void`) is blue; the fluid of a sheet is two separate channels, one on each side of the sheet (f > c and f < −c), drawn blue and red. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
 - **Export:** writes the file on a worker thread. The log shows the same report as the command line.
-- **Property report:** volumes, wetted area, hydraulic diameters, wall thickness and connectivity of the solid and the fluid, in a table in its own window, with Copy and Save JSON (see [Property report](#property-report)). `tpms-gui ... --report` opens with it.
+- **Property report:** volumes, wetted area, hydraulic diameters, wall thickness and connectivity of the solid and the fluid, in a table in its own window, with Copy, Save JSON and Save CSV (see [Property report](#property-report)). `tpms-gui ... --report` opens with it.
 - **Command line:** the equivalent `tpms` command, with a Copy button. Use it to repeat an export or to script one.
 
 `tpms-gui` also takes the `tpms` options, so `tpms-gui --type diamond --density 0.3 -o d.step` (for example a copied command line) opens with those settings. `tpms-gui --screenshot FILE.ppm [options]` renders once the preview is final, saves the window as an image and quits (for docs and tests).

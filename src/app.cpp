@@ -662,7 +662,7 @@ int main(int argc, char** argv) {
     std::string log = startError.empty() ? "" : "error: " + startError + "\n", status;
     auto exportStart = std::chrono::steady_clock::now();
     size_t logSize = 0;
-    int frames = 0;
+    int frames = 0;  // since the last job result: a new window needs a few frames for its layout
 
     std::vector<const char*> typeNames;
     for (const Surface& sf : surfaces()) typeNames.push_back(sf.name.c_str());
@@ -677,6 +677,7 @@ int main(int argc, char** argv) {
         wantedKey = commandLine(geometry);
         if (previewJob.valid() && previewJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             shown = previewJob.get();
+            frames = 0;
             std::string box;  // refit the view when the bounds change
             for (int a = 0; a < 3; ++a) box += num(shown.lo[a]) + " " + num(shown.hi[a]) + " ";
             if (box != lastBox && !shown.tris.empty()) fit(cam, shown), lastBox = box;
@@ -700,6 +701,7 @@ int main(int argc, char** argv) {
         }
         if (reportJob.valid() && reportJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             report = reportJob.get();
+            frames = 0;
             showReport = true;
             status.clear();
         }
