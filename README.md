@@ -2,7 +2,7 @@
 
 `tpms` turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface. There is a command-line tool, `tpms`, and a desktop app with a live 3D preview, `tpms-gui`.
 
-**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option.
+**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube or torus shell with cells that follow the curvature, or a cylinder, sphere or torus cut from a straight lattice (STL and faceted STEP so far).
 
 ![tpms-gui](docs/gui.png)
 
@@ -10,7 +10,7 @@
 
 Run `build/tpms-gui`.
 
-- **Left panel:** every option of the command line, grouped as Surface, Box and Export. Numbers are typed (with − / + buttons) and clamped to valid values. Options that do not apply to the chosen output file are hidden: mesh resolution for STEP, patches and tolerance for STL.
+- **Left panel:** every option of the command line, grouped as Surface, Shape and Export. Numbers are typed (with − / + buttons) and clamped to valid values. Options that do not apply to the chosen output file are hidden: mesh resolution for STEP, patches and tolerance for STL.
 - **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread in about half a second. Each wall (level set) is meshed on its own, so even very thin sheets show without holes; the cuts on the box faces come from a 2D grid 4 times finer. The line above the view gives the triangle count and the solid fraction (from quasi-random samples of the field, not from the preview mesh). Pieces that the export drops as fragments are still drawn. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
 - **Export:** writes the file on a worker thread. The log shows the same report as the command line.
 - **Command line:** the equivalent `tpms` command, with a Copy button. Use it to repeat an export or to script one.
@@ -74,7 +74,30 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 - `--form sheet` is the region |f| ≤ c: a wall around the surface. The wall thickness comes from the level set, so it is not exactly constant.
 - `--form network` is the region f ≤ c: one of the two channel networks.
 - `--density R` finds c so that one unit cell has solid volume fraction R. It always means the solid fraction, also with `--part void`.
-- `--part void` exports the box minus the solid. Use it as the fluid domain for CFD. A sheet lattice has two separate fluid regions, so you get two solids.
+- `--part void` exports the shape minus the solid. Use it as the fluid domain for CFD. A sheet lattice in a box has two separate fluid regions, so you get two solids.
+
+## Shapes
+
+| `--shape` | Size options | Cells | Kind |
+|---|---|---|---|
+| `box` (default) | — | `--cell L`, `--cells nx ny nz` | box `[0, n x L]` |
+| `tube` | `--radius R0 R1 --height H` | `--cells radial around axial` | cells follow the shape |
+| `torus-shell` | `--radius R0 R1 --major R` | `--cells radial ring tube` | cells follow the shape |
+| `cylinder` | `--radius R --height H` | `--cell L` | trimmed |
+| `sphere` | `--radius R` | `--cell L` | trimmed |
+| `torus` | `--radius r --major R` | `--cell L` | trimmed |
+
+- **Cells follow the shape** (tube, torus shell): the lattice is built in a parameter box with one unit per cell and bent into the shape. No cell is cut on the curved walls, and the cell count around must be whole, so the lattice closes on itself. `--radial log` (default) keeps cells square: they grow with the radius. `--radial linear` keeps the radial cell size constant, so cells stretch around on the outside. The GUI shows the resulting cell sizes.
+- **Trimmed** (cylinder, sphere, torus): a straight lattice of `--cell` cells, cut by the shape. Use this for solid shapes: bending cells around an axis or a pole would squeeze them to nothing there.
+- Round shapes are centered at the origin with their axis along z.
+- Bending stretches cells, and stretched walls are thicker, so the solid fraction differs from `--density` (which is per unit cell). The tool samples the field and prints the real value.
+- Smooth STEP works for the box only so far. Use `.stl` or `--faceted` for the other shapes.
+
+Example: a gyroid tube, 15 to 25 mm radius, 30 mm long, 12 cells around:
+
+```bash
+build/tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.stl
+```
 
 ## STEP options
 
@@ -91,11 +114,11 @@ Mesh runs (STL, `--faceted`) print the triangle count, solids, whether the mesh 
 
 Both warn when:
 
-- the solid fraction is more than 5 % away from `--density`.
-- pieces were dropped. Small fragments cut off by the box faces are dropped by default (`--min-fragment`), because a floating piece breaks an FEA or CFD setup.
+- the solid fraction of the result is more than 5 % away from what the field gives (sampled at quasi-random points). This usually means walls thinner than the grid: raise `--res` or `--patches`.
+- pieces were dropped. Small fragments cut off by the shape are dropped by default (`--min-fragment`), because a floating piece breaks an FEA or CFD setup.
 - inner cavities were found. The tool cannot write a solid with an inner cavity yet, so it drops the cavity shell and warns. This only happens at extreme levels, for example when a network breaks into separate blobs.
 
-`ctest` in the build folder runs each surface type once and fails if the tool's own checks fail.
+`ctest` in the build folder runs each surface type (smooth STEP) and each shape (STL) once, and fails if the tool's own checks fail.
 
 ## Checking a STEP file with OpenCASCADE
 
@@ -160,12 +183,13 @@ Merged files have fewer faces but can be larger: each merged face is a dense con
 
 ### Faceted STEP and STL
 
-1. Sample the field on a regular grid over the box. The field is |f| − c (sheet) or f − c (network); `--part void` uses its negative.
+1. Sample the field on a regular grid. The field is |f| − c (sheet) or f − c (network); `--part void` uses its negative. The grid covers the box; for a tube or torus shell, the parameter box (one unit per cell); for a trimmed shape, its bounds plus one grid step, with the field cut by the shape (the larger of the two values).
 2. Extract the surface with marching tetrahedra. Each grid cube is split into 6 tetrahedra along its main diagonal. The split is the same in every cube, so no ambiguous cases occur and neighboring cubes share edges exactly.
-3. Close the solid with planar caps on the six box faces. Each face square is split along the same diagonal as the tetrahedra and clipped to the inside region. The caps reuse the surface vertices, so the mesh is watertight.
+3. Close the solid with planar caps on the box faces. Each face square is split along the same diagonal as the tetrahedra and clipped to the inside region. The caps reuse the surface vertices, so the mesh is watertight. Axes that wrap around (around a tube; around and along a torus shell) get no caps: their two ends are welded instead.
 4. Keep each surface vertex at least 2 % of a grid edge away from grid nodes. This prevents near-zero edges and does not change the mesh topology.
-5. Split the mesh into connected solids and drop small fragments.
-6. Write STEP AP214 directly: `MANIFOLD_SOLID_BREP` → `CLOSED_SHELL` → `ADVANCED_FACE` on a `PLANE` per triangle, with shared `EDGE_CURVE`s. STL is binary.
+5. For a tube or torus shell, map every vertex from the parameter box to mm. The mapping keeps orientation, so the mesh stays closed and outward.
+6. Split the mesh into connected solids and drop small fragments.
+7. Write STEP AP214 directly: `MANIFOLD_SOLID_BREP` → `CLOSED_SHELL` → `ADVANCED_FACE` on a `PLANE` per triangle, with shared `EDGE_CURVE`s. STL is binary.
 
 ## Roadmap
 
@@ -173,5 +197,6 @@ Merged files have fewer faces but can be larger: each merged face is a dense con
 - **v1 merged faces (done):** 3–8 times fewer faces through trimmed height-field regions.
 - **Next for v1:** test import in NX; fix merged Neovius sheets; smaller merged files (adaptive knots); inner cavities (`BREP_WITH_VOIDS`).
 - **v2 (done):** GUI with every command-line option and a live preview.
-- **Next:** graded density and cell size.
+- **Curved shapes, phase 1 (done):** tube and torus shell with cells that follow the shape; trimmed cylinder, sphere and torus; preview, STL and faceted STEP.
+- **Next:** smooth STEP for curved shapes (phase 2); graded density and cell size.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.

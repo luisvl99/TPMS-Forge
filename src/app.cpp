@@ -32,15 +32,25 @@ using namespace tpms;
 
 namespace {
 
+// Shapes in the order of the GUI list, with their --shape names.
+const char* const kShapeArgs[] = {"box", "tube", "torus-shell", "cylinder", "sphere", "torus"};
+const char* const kShapeLabels =
+    "Box\0Tube (cells follow the shape)\0Torus shell (cells follow the shape)\0"
+    "Cylinder (trimmed)\0Sphere (trimmed)\0Torus (trimmed)\0";
+enum { kBox, kTube, kTorusShell, kCylinder, kSphere, kTorus };
+
 struct Settings {
     int type = 0;  // index into surfaces()
     int form = 0;  // sheet, network
     int part = 0;  // solid, void
     int thickness = 0;  // by density, by iso level
     float density = 0.2f, level = 0.5f;
+    int shape = kBox;
     bool cubic = true;
     float cell[3] = {10, 10, 10};
     int cells[3] = {2, 2, 2};
+    float r0 = 15, r1 = 25, height = 30, major = 40;
+    int radial = 0;  // log, linear
     int patches = 3;
     float tol = 0;  // 0: automatic
     bool exact = false, faceted = false;
@@ -48,6 +58,17 @@ struct Settings {
     float minFragment = 0.01f;
     char out[1024] = "lattice.step";
 };
+
+// Sizes that suit each shape with 10 mm cells.
+void shapeDefaults(Settings& s) {
+    const int counts[6][3] = {{2, 2, 2}, {1, 12, 3}, {1, 24, 6}, {2, 2, 2}, {2, 2, 2}, {2, 2, 2}};
+    for (int k = 0; k < 3; ++k) s.cells[k] = counts[s.shape][k];
+    if (s.shape == kTube) s.r0 = 15, s.r1 = 25, s.height = 30;
+    if (s.shape == kTorusShell) s.r0 = 5, s.r1 = 15, s.major = 40;
+    if (s.shape == kCylinder) s.r1 = 15, s.height = 30;
+    if (s.shape == kSphere) s.r1 = 15;
+    if (s.shape == kTorus) s.r1 = 10, s.major = 30;
+}
 
 std::string num(double v) {
     char b[32];
@@ -66,11 +87,21 @@ std::vector<std::string> geometryArgs(const Settings& s) {
                                   "--part", s.part ? "void" : "solid"};
     if (s.thickness) a.insert(a.end(), {"--level", num(s.level)});
     else a.insert(a.end(), {"--density", num(s.density)});
-    a.push_back("--cell");
-    for (int k = 0; k < (s.cubic ? 1 : 3); ++k) a.push_back(num(s.cell[k]));
-    a.push_back("--cells");
-    const bool same = s.cells[0] == s.cells[1] && s.cells[1] == s.cells[2];
-    for (int k = 0; k < (same ? 1 : 3); ++k) a.push_back(std::to_string(s.cells[k]));
+    if (s.shape != kBox) a.insert(a.end(), {"--shape", kShapeArgs[s.shape]});
+    if (s.shape == kTube || s.shape == kTorusShell) a.insert(a.end(), {"--radius", num(s.r0), num(s.r1)});
+    if (s.shape >= kCylinder) a.insert(a.end(), {"--radius", num(s.r1)});
+    if (s.shape == kTube || s.shape == kCylinder) a.insert(a.end(), {"--height", num(s.height)});
+    if (s.shape == kTorusShell || s.shape == kTorus) a.insert(a.end(), {"--major", num(s.major)});
+    if (s.shape != kTube && s.shape != kTorusShell) {
+        a.push_back("--cell");
+        for (int k = 0; k < (s.cubic ? 1 : 3); ++k) a.push_back(num(s.cell[k]));
+    }
+    if (s.shape <= kTorusShell) {
+        a.push_back("--cells");
+        const bool same = s.cells[0] == s.cells[1] && s.cells[1] == s.cells[2];
+        for (int k = 0; k < (same ? 1 : 3); ++k) a.push_back(std::to_string(s.cells[k]));
+    }
+    if ((s.shape == kTube || s.shape == kTorusShell) && s.radial) a.insert(a.end(), {"--radial", "linear"});
     if (s.minFragment != 0.01f) a.insert(a.end(), {"--min-fragment", num(s.minFragment)});
     return a;
 }
@@ -117,11 +148,11 @@ bool saveDialog(char* path, size_t size) {
 #endif
 }
 
-// Preview: the walls and the cuts on the box faces, built on a worker thread.
+// Preview: the walls and the cut faces, built on a worker thread.
 struct Preview {
-    std::vector<float> tris;  // per vertex: x y z nx ny nz
-    float box[3] = {0, 0, 0};
-    bool solid = true;
+    std::vector<float> tris;  // per vertex: x y z nx ny nz, in mm
+    float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+    bool solid = true, box = true;
     std::string info, error;
 };
 
@@ -129,103 +160,161 @@ Preview buildPreview(const std::vector<std::string>& args) {
     Preview p;
     Options o;
     if (!parseArgs(args, o, p.error)) return p;
-    const double nCells = double(o.cells[0]) * o.cells[1] * o.cells[2];
-    const int res = std::clamp(int(std::cbrt(1.5e6 / nCells)), 6, 24);
+    const Shape& shape = o.shape;
     const Lattice lat = makeLattice(o);
-    for (int a = 0; a < 3; ++a) p.box[a] = float(o.cells[a] * o.cell[a]);
-    p.solid = o.part == Part::Solid;
-    auto add = [&](const Vec3& v, const Vec3& n) {
-        p.tris.insert(p.tris.end(), {float(v.x), float(v.y), float(v.z), float(n.x), float(n.y), float(n.z)});
+    Lattice open = lat;  // the lattice without the trimming shape
+    open.shape = Shape{};
+    // At most about 600 000 grid nodes, 6 to 24 steps per cell: fast enough
+    // to follow the inputs.
+    const Grid unit = gridOf(o, 1);
+    const double units = double(unit.steps[0]) * unit.steps[1] * unit.steps[2];
+    const int res = std::clamp(int(std::cbrt(6e5 / units)), 6, 24);
+    const Grid grid = gridOf(o, res);
+    p.solid = o.part == Part::Solid, p.box = shape.kind == ShapeKind::Box;
+
+    double h = 1e300;
+    for (int a = 0; a < 3; ++a) h = std::min(h, grid.size[a] / grid.steps[a]);
+    const double d = 1e-3 * h;
+    auto gradient = [&](const Field& f, Vec3 q) {
+        Vec3 g;
+        for (int k = 0; k < 3; ++k) {
+            Vec3 a = q, b = q;
+            a[k] += d, b[k] -= d;
+            g[k] = f(a.x, a.y, a.z) - f(b.x, b.y, b.z);
+        }
+        return g;
+    };
+    const Field openField = [&](double x, double y, double z) { return open(x, y, z); };
+    const Field shapeField = [&](double x, double y, double z) { return shape.inside(x, y, z); };
+
+    // A point and normal in mm.
+    auto emitMm = [&](Vec3 q, Vec3 n) {
+        n = n * (1.0 / std::max(norm(n), 1e-30));
+        p.tris.insert(p.tris.end(), {float(q.x), float(q.y), float(q.z), float(n.x), float(n.y), float(n.z)});
+    };
+    // A point and normal in grid space, mapped to mm.
+    auto emit = [&](Vec3 q, Vec3 n) {
+        if (shape.conformal()) n = shape.normal(q, n), q = shape.map(q);
+        emitMm(q, n);
+    };
+    // The part of a triangle where g < 0, with interpolated normals.
+    auto clipEmit = [&](const Vec3 q[3], const Vec3 n[3], const double g[3]) {
+        Vec3 pq[4], pn[4];
+        int m = 0;
+        for (int k = 0; k < 3; ++k) {
+            const int l = (k + 1) % 3;
+            if (g[k] < 0) pq[m] = q[k], pn[m++] = n[k];
+            if ((g[k] < 0) != (g[l] < 0)) {
+                const double t = g[k] / (g[k] - g[l]);
+                pq[m] = q[k] + (q[l] - q[k]) * t, pn[m++] = n[k] + (n[l] - n[k]) * t;
+            }
+        }
+        for (int k = 1; k + 1 < m; ++k) emit(pq[0], pn[0]), emit(pq[k], pn[k]), emit(pq[k + 1], pn[k + 1]);
+    };
+    auto onGridFace = [&](const Vec3& a, const Vec3& b, const Vec3& c) {
+        for (int k = 0; k < 3; ++k)
+            for (double side : {grid.origin[k], grid.origin[k] + grid.size[k]})
+                if (std::fabs(a[k] - side) < d && std::fabs(b[k] - side) < d && std::fabs(c[k] - side) < d) return true;
+        return false;
     };
 
     // Walls: each level set f = c meshed alone, as the boundary of f < c.
     // A sheet's two walls can be closer than a grid step, but each wall alone
     // is smooth, so the preview has no holes at any thickness. Normals are the
     // gradient of the exported field: smooth, and pointing out of the solid.
-    const double d = 1e-4 * std::min({o.cell[0], o.cell[1], o.cell[2]});
-    auto onBoxFace = [&](const Vec3& a, const Vec3& b, const Vec3& c) {
-        for (int k = 0; k < 3; ++k)
-            for (double side : {0.0, double(p.box[k])})
-                if (std::fabs(a[k] - side) < d && std::fabs(b[k] - side) < d && std::fabs(c[k] - side) < d) return true;
-        return false;
-    };
     std::vector<double> levels = {lat.level};
     if (lat.form == Form::Sheet) levels.push_back(-lat.level);
     for (double c : levels) {
-        Lattice wall = lat;
+        Lattice wall = open;
         wall.form = Form::Network, wall.part = Part::Solid, wall.level = c;
-        const Mesh m = meshLattice(wall, o.cells, res);
-        std::vector<Vec3> normals;
+        const Mesh m = meshField([&](double x, double y, double z) { return wall(x, y, z); }, grid);
+        std::vector<Vec3> normals, mm;  // per vertex: normal in grid space; position and normal in mm
         for (const Vec3& v : m.vertices) {
-            Vec3 g;
-            for (int k = 0; k < 3; ++k) {
-                Vec3 q = v, r = v;
-                q[k] += d, r[k] -= d;
-                g[k] = lat(q.x, q.y, q.z) - lat(r.x, r.y, r.z);
-            }
-            normals.push_back(g * (1.0 / std::max(norm(g), 1e-30)));
+            normals.push_back(gradient(openField, v));
+            if (!shape.conformal()) continue;
+            mm.push_back(shape.map(v));
+            mm.push_back(shape.normal(v, normals.back()));
         }
-        for (const auto& t : m.triangles)
-            if (!onBoxFace(m.vertices[t[0]], m.vertices[t[1]], m.vertices[t[2]]))
-                for (uint32_t v : t) add(m.vertices[v], normals[v]);
+        for (const auto& t : m.triangles) {
+            const Vec3 q[3] = {m.vertices[t[0]], m.vertices[t[1]], m.vertices[t[2]]};
+            if (onGridFace(q[0], q[1], q[2])) continue;
+            if (shape.conformal()) {  // map each vertex once, not once per triangle
+                for (uint32_t v : t) emitMm(mm[2 * v], mm[2 * v + 1]);
+                continue;
+            }
+            const Vec3 n[3] = {normals[t[0]], normals[t[1]], normals[t[2]]};
+            double g[3] = {-1, -1, -1};
+            if (shape.trimmed())
+                for (int k = 0; k < 3; ++k) g[k] = shape.inside(q[k].x, q[k].y, q[k].z);
+            clipEmit(q, n, g);
+        }
     }
 
-    // Cuts on the box faces: the exported region of each face, clipped on a
-    // 2D grid 4 times finer than the walls (thin sheets give thin bands).
-    for (int a = 0; a < 3; ++a)
-        for (int side = 0; side < 2; ++side) {
-            const int u = (a + 1) % 3, v = (a + 2) % 3, nu = 4 * res * o.cells[u], nv = 4 * res * o.cells[v];
-            Vec3 n;
-            n[a] = side ? 1 : -1;
-            auto at = [&](int i, int j) {
-                Vec3 q;
-                q[a] = side ? p.box[a] : 0, q[u] = p.box[u] * i / nu, q[v] = p.box[v] * j / nv;
-                return q;
-            };
-            std::vector<double> g(size_t(nu + 1) * size_t(nv + 1));
-            for (int j = 0; j <= nv; ++j)
-                for (int i = 0; i <= nu; ++i) {
-                    const Vec3 q = at(i, j);
-                    g[size_t(j) * size_t(nu + 1) + size_t(i)] = lat(q.x, q.y, q.z);
-                }
-            auto clip = [&](const int (&c)[3][2]) {
-                Vec3 P[3], poly[4];
-                double G[3];
-                for (int k = 0; k < 3; ++k)
-                    P[k] = at(c[k][0], c[k][1]), G[k] = g[size_t(c[k][1]) * size_t(nu + 1) + size_t(c[k][0])];
-                int m = 0;
-                for (int k = 0; k < 3; ++k) {
-                    const int l = (k + 1) % 3;
-                    if (G[k] < 0) poly[m++] = P[k];
-                    if ((G[k] < 0) != (G[l] < 0)) poly[m++] = P[k] + (P[l] - P[k]) * (G[k] / (G[k] - G[l]));
-                }
-                for (int k = 1; k + 1 < m; ++k) add(poly[0], n), add(poly[k], n), add(poly[k + 1], n);
-            };
-            for (int j = 0; j < nv; ++j)
-                for (int i = 0; i < nu; ++i) {
-                    clip({{i, j}, {i + 1, j}, {i + 1, j + 1}});
-                    clip({{i, j}, {i + 1, j + 1}, {i, j + 1}});
-                }
+    if (shape.trimmed()) {
+        // Cut faces on the shape: its surface, cut to the lattice region.
+        // Each triangle is split 4 x 4 first, as thin sheets give thin bands.
+        const Mesh surf = meshField(shapeField, grid);
+        const int k = 4;
+        for (const auto& t : surf.triangles) {
+            const Vec3 &A = surf.vertices[t[0]], &B = surf.vertices[t[1]], &C = surf.vertices[t[2]];
+            auto at = [&](int i, int j) { return A + (B - A) * (double(i) / k) + (C - A) * (double(j) / k); };
+            for (int i = 0; i < k; ++i)
+                for (int j = 0; i + j < k; ++j)
+                    for (int up = 0; up < (i + j + 1 < k ? 2 : 1); ++up) {
+                        const Vec3 q[3] = {up ? at(i + 1, j + 1) : at(i, j), up ? at(i, j + 1) : at(i + 1, j),
+                                           up ? at(i + 1, j) : at(i, j + 1)};
+                        Vec3 n[3];
+                        double g[3];
+                        for (int c = 0; c < 3; ++c)
+                            n[c] = gradient(shapeField, q[c]), g[c] = open(q[c].x, q[c].y, q[c].z);
+                        clipEmit(q, n, g);
+                    }
         }
+    } else {
+        // Cut faces on the grid faces (box faces, or the faces of a conformal
+        // parameter box, which map to cylinders, tori and flat rings), on a 2D
+        // grid 4 times finer than the walls: thin sheets give thin bands.
+        for (int a = 0; a < 3; ++a)
+            for (int side = 0; side < 2 && !(grid.periodic >> a & 1); ++side) {
+                const int u = (a + 1) % 3, v = (a + 2) % 3, nu = 4 * grid.steps[u], nv = 4 * grid.steps[v];
+                Vec3 n;
+                n[a] = side ? 1 : -1;
+                auto at = [&](int i, int j) {
+                    Vec3 q;
+                    q[a] = grid.origin[a] + side * grid.size[a];
+                    q[u] = grid.origin[u] + grid.size[u] * i / nu, q[v] = grid.origin[v] + grid.size[v] * j / nv;
+                    return q;
+                };
+                std::vector<double> g(size_t(nu + 1) * size_t(nv + 1));
+                for (int j = 0; j <= nv; ++j)
+                    for (int i = 0; i <= nu; ++i) {
+                        const Vec3 q = at(i, j);
+                        g[size_t(j) * size_t(nu + 1) + size_t(i)] = open(q.x, q.y, q.z);
+                    }
+                const Vec3 ns[3] = {n, n, n};
+                auto cell = [&](int i0, int j0, int i1, int j1, int i2, int j2) {
+                    const Vec3 q[3] = {at(i0, j0), at(i1, j1), at(i2, j2)};
+                    const double gq[3] = {g[size_t(j0) * size_t(nu + 1) + size_t(i0)],
+                                          g[size_t(j1) * size_t(nu + 1) + size_t(i1)],
+                                          g[size_t(j2) * size_t(nu + 1) + size_t(i2)]};
+                    clipEmit(q, ns, gq);
+                };
+                for (int j = 0; j < nv; ++j)
+                    for (int i = 0; i < nu; ++i) cell(i, j, i + 1, j, i + 1, j + 1), cell(i, j, i + 1, j + 1, i, j + 1);
+            }
+    }
     if (p.tris.empty()) {
         p.error = "Nothing to show: no solid at this density / level.";
         return p;
     }
+    for (int a = 0; a < 3; ++a) p.lo[a] = 1e30f, p.hi[a] = -1e30f;
+    for (size_t i = 0; i < p.tris.size(); i += 6)
+        for (int a = 0; a < 3; ++a) p.lo[a] = std::min(p.lo[a], p.tris[i + a]), p.hi[a] = std::max(p.hi[a], p.tris[i + a]);
 
-    // Solid fraction from quasi-random points, so it does not depend on the
-    // preview mesh.
-    const double g3 = 1.2207440846057595, step[3] = {1 / g3, 1 / (g3 * g3), 1 / (g3 * g3 * g3)};
-    const int samples = 1 << 16;
-    int in = 0;
-    for (int k = 0; k < samples; ++k) {
-        double x[3];
-        for (int a = 0; a < 3; ++a) x[a] = std::fmod(0.5 + k * step[a], 1.0) * p.box[a];
-        in += lat(x[0], x[1], x[2]) < 0;
-    }
-    const double frac = p.solid ? double(in) / samples : 1 - double(in) / samples;
+    const double frac = sampledFraction(o, lat);
     char b[200];
     std::snprintf(b, sizeof b, "Preview: %zu triangles (%d steps per cell), solid fraction %.3f", p.tris.size() / 18, res,
-                  frac);
+                  p.solid ? frac : 1 - frac);
     p.info = b;
     return p;
 }
@@ -235,9 +324,16 @@ struct Camera {
     float dist = 0, panX = 0, panY = 0;
 };
 
-void fit(Camera& cam, const float box[3]) {
+// Half the diagonal of the preview's bounds.
+float radius(const Preview& p) {
+    float r2 = 0;
+    for (int a = 0; a < 3; ++a) r2 += 0.25f * (p.hi[a] - p.lo[a]) * (p.hi[a] - p.lo[a]);
+    return std::sqrt(r2);
+}
+
+void fit(Camera& cam, const Preview& p) {
     cam = Camera{};
-    cam.dist = 1.25f * 0.5f * std::sqrt(box[0] * box[0] + box[1] * box[1] + box[2] * box[2]) / std::tan(0.2618f);
+    cam.dist = 1.25f * radius(p) / std::tan(0.2618f);
 }
 
 // Compiles the preview triangles into a display list, which the driver keeps
@@ -268,7 +364,7 @@ void drawScene(const Preview& p, GLuint list, const Camera& cam, int x, int y, i
     glDisable(GL_SCISSOR_TEST);
     if (!list || w <= 0 || h <= 0) return;
 
-    const float r = 0.5f * std::sqrt(p.box[0] * p.box[0] + p.box[1] * p.box[1] + p.box[2] * p.box[2]);
+    const float r = radius(p);
     const double zNear = std::max(cam.dist - 2 * r, 0.01f * r), zFar = cam.dist + 2 * r;
     const double top = zNear * std::tan(0.2618), right = top * w / h;  // 30 degree field of view
     glMatrixMode(GL_PROJECTION);
@@ -288,7 +384,7 @@ void drawScene(const Preview& p, GLuint list, const Camera& cam, int x, int y, i
     glTranslatef(cam.panX, cam.panY, -cam.dist);
     glRotatef(cam.pitch - 90, 1, 0, 0);
     glRotatef(cam.yaw, 0, 0, 1);
-    glTranslatef(-0.5f * p.box[0], -0.5f * p.box[1], -0.5f * p.box[2]);
+    glTranslatef(-0.5f * (p.lo[0] + p.hi[0]), -0.5f * (p.lo[1] + p.hi[1]), -0.5f * (p.lo[2] + p.hi[2]));
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_LIGHTING);
@@ -307,17 +403,18 @@ void drawScene(const Preview& p, GLuint list, const Camera& cam, int x, int y, i
     glCallList(list);
     glDisable(GL_LIGHTING);
 
-    // Box edges, and x / y / z axes in red / green / blue at the origin.
+    // Box edges (box shape only), and x / y / z axes in red / green / blue at
+    // the origin.
     glLineWidth(1.5f);
     glBegin(GL_LINES);
     glColor3f(0.55f, 0.58f, 0.62f);
-    for (int a = 0; a < 3; ++a)
+    for (int a = 0; a < 3 && p.box; ++a)
         for (int k = 0; k < 4; ++k) {
             float c0[3], c1[3];
             const int u = (a + 1) % 3, v = (a + 2) % 3;
-            c0[a] = 0, c1[a] = p.box[a];
-            c0[u] = c1[u] = (k & 1) ? p.box[u] : 0;
-            c0[v] = c1[v] = (k & 2) ? p.box[v] : 0;
+            c0[a] = p.lo[a], c1[a] = p.hi[a];
+            c0[u] = c1[u] = (k & 1) ? p.hi[u] : p.lo[u];
+            c0[v] = c1[v] = (k & 2) ? p.hi[v] : p.lo[v];
             glVertex3fv(c0);
             glVertex3fv(c1);
         }
@@ -325,7 +422,7 @@ void drawScene(const Preview& p, GLuint list, const Camera& cam, int x, int y, i
     glDisable(GL_DEPTH_TEST);  // axes stay visible through the lattice
     glLineWidth(2.5f);
     glBegin(GL_LINES);
-    const float axis = 0.3f * std::max({p.box[0], p.box[1], p.box[2]});
+    const float axis = 0.6f * radius(p);
     const float colors[3][3] = {{0.9f, 0.3f, 0.3f}, {0.3f, 0.85f, 0.3f}, {0.35f, 0.5f, 1}};
     for (int a = 0; a < 3; ++a) {
         float end[3] = {0, 0, 0};
@@ -360,6 +457,11 @@ Settings fromOptions(const Options& o) {
     if (o.hasLevel) s.level = float(o.level);
     for (int a = 0; a < 3; ++a) s.cell[a] = float(o.cell[a]), s.cells[a] = o.cells[a];
     s.cubic = o.cell[0] == o.cell[1] && o.cell[1] == o.cell[2];
+    s.shape = int(o.shape.kind);  // the GUI list follows ShapeKind
+    if (s.shape != kBox) {
+        s.r0 = float(o.shape.r0), s.r1 = float(o.shape.r1), s.height = float(o.shape.height);
+        s.major = float(o.shape.major), s.radial = o.shape.logRadial ? 0 : 1;
+    }
     const double autoTol = 0.001 * std::min({o.cell[0], o.cell[1], o.cell[2]});
     s.tol = std::fabs(o.tol - autoTol) < 1e-12 ? 0 : float(o.tol);
     s.patches = o.patches, s.exact = o.exact, s.faceted = o.faceted, s.res = o.res;
@@ -428,8 +530,9 @@ int main(int argc, char** argv) {
         wantedKey = commandLine(geometry);
         if (previewJob.valid() && previewJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             shown = previewJob.get();
-            const std::string box = num(shown.box[0]) + " " + num(shown.box[1]) + " " + num(shown.box[2]);
-            if (box != lastBox && !shown.tris.empty()) fit(cam, shown.box), lastBox = box;
+            std::string box;  // refit the view when the bounds change
+            for (int a = 0; a < 3; ++a) box += num(shown.lo[a]) + " " + num(shown.hi[a]) + " ";
+            if (box != lastBox && !shown.tris.empty()) fit(cam, shown), lastBox = box;
             list = compile(shown, list);
         }
         if (!previewJob.valid() && wantedKey != shownKey) {
@@ -468,22 +571,49 @@ int main(int argc, char** argv) {
         else ImGui::InputFloat("Iso level c", &s.level, 0.01f, 0.1f, "%.4f");
         s.density = std::clamp(s.density, 0.01f, 0.99f);
 
-        ImGui::SeparatorText("Box");
-        ImGui::Checkbox("Cubic cell", &s.cubic);
-        if (s.cubic) {
-            ImGui::InputFloat("Cell size (mm)", &s.cell[0], 1, 5, "%.2f");
-            s.cell[1] = s.cell[2] = s.cell[0];
-        } else {
-            ImGui::InputFloat3("Cell size (mm)", s.cell, "%.2f");
+        ImGui::SeparatorText("Shape");
+        if (ImGui::Combo("Shape", &s.shape, kShapeLabels)) shapeDefaults(s);
+        const bool conformal = s.shape == kTube || s.shape == kTorusShell;
+        if (s.shape == kTorusShell || s.shape == kTorus) ImGui::InputFloat("Ring radius (mm)", &s.major, 1, 5, "%.2f");
+        if (conformal) {
+            ImGui::InputFloat(s.shape == kTube ? "Inner radius (mm)" : "Inner tube radius", &s.r0, 1, 5, "%.2f");
+            ImGui::InputFloat(s.shape == kTube ? "Outer radius (mm)" : "Outer tube radius", &s.r1, 1, 5, "%.2f");
+        } else if (s.shape != kBox) {
+            ImGui::InputFloat(s.shape == kTorus ? "Tube radius (mm)" : "Radius (mm)", &s.r1, 1, 5, "%.2f");
         }
-        ImGui::InputInt3("Cells x y z", s.cells);
-        for (int k = 0; k < 3; ++k) s.cells[k] = std::clamp(s.cells[k], 1, 100), s.cell[k] = std::max(0.1f, s.cell[k]);
-        ImGui::TextDisabled("Box %g x %g x %g mm", s.cells[0] * s.cell[0], s.cells[1] * s.cell[1],
-                            s.cells[2] * s.cell[2]);
+        if (s.shape == kTube || s.shape == kCylinder) ImGui::InputFloat("Height (mm)", &s.height, 1, 5, "%.2f");
+        // Keep sizes valid: positive, inner below outer, the ring outside the tube.
+        s.r0 = std::max(0.1f, s.r0), s.r1 = std::max(conformal ? s.r0 + 0.1f : 0.1f, s.r1);
+        s.height = std::max(0.1f, s.height), s.major = std::max(s.r1 + 0.1f, s.major);
+        if (conformal) {
+            ImGui::InputInt3(s.shape == kTube ? "Cells: r, around, z" : "Cells: r, ring, tube", s.cells);
+            ImGui::Combo("Radial spacing", &s.radial, "Log (square cells)\0Linear (even thickness)\0");
+        } else {
+            ImGui::Checkbox("Cubic cell", &s.cubic);
+            if (s.cubic) {
+                ImGui::InputFloat("Cell size (mm)", &s.cell[0], 1, 5, "%.2f");
+                s.cell[1] = s.cell[2] = s.cell[0];
+            } else {
+                ImGui::InputFloat3("Cell size (mm)", s.cell, "%.2f");
+            }
+            if (s.shape == kBox) ImGui::InputInt3("Cells x y z", s.cells);
+        }
+        for (int k = 0; k < 3; ++k) s.cells[k] = std::clamp(s.cells[k], 1, 200), s.cell[k] = std::max(0.1f, s.cell[k]);
+        const float tau = 6.2831853f;
+        if (s.shape == kBox)
+            ImGui::TextDisabled("Box %g x %g x %g mm", s.cells[0] * s.cell[0], s.cells[1] * s.cell[1],
+                                s.cells[2] * s.cell[2]);
+        else if (s.shape == kTube)
+            ImGui::TextDisabled("Cells: %.1f mm radial, %.1f-%.1f around, %.1f axial", (s.r1 - s.r0) / s.cells[0],
+                                tau * s.r0 / s.cells[1], tau * s.r1 / s.cells[1], s.height / s.cells[2]);
+        else if (s.shape == kTorusShell)
+            ImGui::TextDisabled("Cells: %.1f mm radial, %.1f-%.1f ring, %.1f-%.1f tube",
+                                (s.r1 - s.r0) / s.cells[0], tau * (s.major - s.r1) / s.cells[1],
+                                tau * (s.major + s.r1) / s.cells[1], tau * s.r0 / s.cells[2], tau * s.r1 / s.cells[2]);
         ImGui::InputFloat("Min fragment", &s.minFragment, 0.005f, 0.05f, "%.3f");
         s.minFragment = std::clamp(s.minFragment, 0.0f, 1.0f);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Drop pieces smaller than this fraction of the largest piece (cut off by the box).");
+            ImGui::SetTooltip("Drop pieces smaller than this fraction of the largest piece (cut off by the shape).");
 
         ImGui::SeparatorText("Export");
         ImGui::InputText("##file", s.out, sizeof s.out);
@@ -497,6 +627,11 @@ int main(int argc, char** argv) {
             ImGui::Checkbox("Faceted (one face per triangle)", &s.faceted);
             if (s.faceted) {
                 ImGui::InputInt("Mesh steps per cell", &s.res);
+            } else if (s.shape != kBox) {
+                ImGui::PushTextWrapPos(0);
+                ImGui::TextColored({1, 0.6f, 0.4f, 1}, "Smooth STEP works for the box only so far: tick Faceted or "
+                                                       "export .stl.");
+                ImGui::PopTextWrapPos();
             } else {
                 ImGui::InputInt("Start patches per cell", &s.patches);
                 ImGui::InputFloat("Tolerance (mm)", &s.tol, 0, 0, s.tol > 0 ? "%.4f" : "%.0f (auto)");
@@ -508,7 +643,8 @@ int main(int argc, char** argv) {
 
         const std::vector<std::string> args = exportArgs(s);
         const bool exporting = exportJob.valid();
-        ImGui::BeginDisabled(exporting || !shown.error.empty());
+        const bool unsupported = s.shape != kBox && !isStl(s.out) && !s.faceted;
+        ImGui::BeginDisabled(exporting || !shown.error.empty() || unsupported);
         if (ImGui::Button(exporting ? "Exporting..." : "Export", {-1, 0})) {
             {
                 std::lock_guard<std::mutex> lock(logMutex);
@@ -561,7 +697,7 @@ int main(int argc, char** argv) {
                 cam.panX += io.MouseDelta.x * k, cam.panY -= io.MouseDelta.y * k;
             }
             if (io.MouseWheel != 0) cam.dist *= std::pow(0.88f, io.MouseWheel);
-            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) fit(cam, shown.box);
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) fit(cam, shown);
         }
         ImDrawList* fg = ImGui::GetForegroundDrawList();
         const ImVec2 at = {panelW + 12 * scale, 10 * scale};

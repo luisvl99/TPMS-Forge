@@ -1,5 +1,5 @@
 #pragma once
-// Closed triangle mesh of a TPMS lattice clipped to a box.
+// Closed triangle mesh of an implicit field in a box.
 
 #include "tpms.hpp"
 
@@ -7,33 +7,29 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace tpms {
-
-struct Vec3 {
-    double x = 0, y = 0, z = 0;
-    double& operator[](int i) { return i == 0 ? x : i == 1 ? y : z; }
-    double operator[](int i) const { return i == 0 ? x : i == 1 ? y : z; }
-};
-
-inline Vec3 operator+(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
-inline Vec3 operator-(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
-inline Vec3 operator*(Vec3 a, double s) { return {a.x * s, a.y * s, a.z * s}; }
-inline double dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-inline Vec3 cross(Vec3 a, Vec3 b) {
-    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
-}
-inline double norm(Vec3 a) { return std::sqrt(dot(a, a)); }
 
 struct Mesh {
     std::vector<Vec3> vertices;
     std::vector<std::array<uint32_t, 3>> triangles;  // counter-clockwise seen from outside
 };
 
-// Box [0, cells[a] * cell[a]] per axis, sampled with res grid steps per unit cell.
-Mesh meshLattice(const Lattice& lat, const int cells[3], int res,
-                 size_t* droppedDegenerate = nullptr);
+// The box [origin, origin + size] sampled with steps[a] grid steps per axis.
+// Axes set in `periodic` wrap around: the field matches at both ends, so
+// those faces get no caps and the two ends are welded together.
+struct Grid {
+    double origin[3] = {0, 0, 0}, size[3] = {1, 1, 1};
+    int steps[3] = {1, 1, 1};
+    int periodic = 0;
+};
+
+// The region field < 0 inside the grid box, closed with planar caps on the
+// non-periodic box faces.
+using Field = std::function<double(double, double, double)>;
+Mesh meshField(const Field& field, const Grid& grid, size_t* droppedDegenerate = nullptr);
 
 struct ClosedCheck {
     size_t openEdges = 0;         // directed edges without a reverse partner

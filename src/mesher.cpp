@@ -1,11 +1,13 @@
 // Marching tetrahedra on a regular grid over the box, plus planar caps on the
-// six box faces. Every cube is split into 6 tetrahedra along its main diagonal
+// box faces. Every cube is split into 6 tetrahedra along its main diagonal
 // (Freudenthal split). The split is the same in every cube, so neighbor cubes
-// and the caps share edges and vertices exactly. The result is watertight.
+// and the caps share edges and vertices exactly. The result is watertight;
+// periodic axes get no caps and their two ends are welded instead.
 
 #include "mesher.hpp"
 
 #include <algorithm>
+#include <map>
 #include <numeric>
 #include <unordered_map>
 #include <utility>
@@ -20,10 +22,11 @@ constexpr double kEdgeMargin = 0.02;  // fraction of a grid edge
 
 class Builder {
 public:
-    Builder(const Lattice& lat, const int cells[3], int res) {
+    Builder(const Field& field, const Grid& grid) : periodic_(grid.periodic) {
         for (int a = 0; a < 3; ++a) {
-            n_[a] = cells[a] * res;
-            h_[a] = lat.cell[a] / res;
+            n_[a] = grid.steps[a];
+            h_[a] = grid.size[a] / grid.steps[a];
+            origin_[a] = grid.origin[a];
         }
         const double hmin = std::min({h_[0], h_[1], h_[2]});
         minArea2_ = 1e-12 * hmin * hmin;
@@ -32,7 +35,7 @@ public:
         stride_[2] = int64_t(n_[0] + 1) * (n_[1] + 1);
         for (int m = 0; m < 8; ++m)
             off_[m] = (m & 1) * stride_[0] + ((m >> 1) & 1) * stride_[1] + ((m >> 2) & 1) * stride_[2];
-        evaluate(lat);
+        evaluate(field);
     }
 
     Mesh run(size_t* dropped) {
@@ -51,14 +54,15 @@ public:
                     }
                 }
         for (int axis = 0; axis < 3; ++axis)
-            for (int side = 0; side < 2; ++side) cap(axis, side);
+            for (int side = 0; side < 2 && !(periodic_ >> axis & 1); ++side) cap(axis, side);
         if (dropped) *dropped = dropped_;
         return std::move(mesh_);
     }
 
 private:
     int n_[3];
-    double h_[3];
+    double h_[3], origin_[3];
+    int periodic_;
     double minArea2_;
     int64_t stride_[3];
     int64_t off_[8];
@@ -68,21 +72,22 @@ private:
     std::vector<uint32_t> poly_;
     size_t dropped_ = 0;
 
-    void evaluate(const Lattice& lat) {
+    void evaluate(const Field& field) {
         g_.resize(size_t(stride_[2] * (n_[2] + 1)));
 #pragma omp parallel for schedule(static)
         for (int k = 0; k <= n_[2]; ++k)
             for (int j = 0; j <= n_[1]; ++j)
                 for (int i = 0; i <= n_[0]; ++i)
                     g_[size_t(i + j * stride_[1] + k * stride_[2])] =
-                        float(lat(i * h_[0], j * h_[1], k * h_[2]));
+                        float(field(origin_[0] + i * h_[0], origin_[1] + j * h_[1], origin_[2] + k * h_[2]));
     }
 
     bool inside(int64_t node) const { return g_[size_t(node)] < 0.0f; }
 
     Vec3 nodePos(int64_t node) const {
         const int64_t k = node / stride_[2], r = node % stride_[2];
-        return {double(r % stride_[1]) * h_[0], double(r / stride_[1]) * h_[1], double(k) * h_[2]};
+        return {origin_[0] + double(r % stride_[1]) * h_[0], origin_[1] + double(r / stride_[1]) * h_[1],
+                origin_[2] + double(k) * h_[2]};
     }
 
     Vec3 cornerOffset(int m) const {
@@ -221,10 +226,38 @@ private:
     }
 };
 
+// Welds the two ends of each periodic axis: vertices on the far face move to
+// the near face and merge with the vertices already there. Both faces were
+// cut the same way, so their vertices match up to rounding.
+void weldPeriodic(Mesh& m, const Grid& grid) {
+    double h[3];
+    for (int a = 0; a < 3; ++a) h[a] = grid.size[a] / grid.steps[a];
+    std::map<std::array<int64_t, 3>, uint32_t> seam;
+    std::vector<uint32_t> to(m.vertices.size());
+    for (uint32_t v = 0; v < m.vertices.size(); ++v) {
+        to[v] = v;
+        Vec3& p = m.vertices[v];
+        bool onSeam = false;
+        for (int a = 0; a < 3; ++a) {
+            if (!(grid.periodic >> a & 1)) continue;
+            if (std::fabs(p[a] - grid.origin[a] - grid.size[a]) < 1e-6 * h[a]) p[a] = grid.origin[a];
+            onSeam |= std::fabs(p[a] - grid.origin[a]) < 1e-6 * h[a];
+        }
+        if (!onSeam) continue;
+        std::array<int64_t, 3> key;
+        for (int a = 0; a < 3; ++a) key[size_t(a)] = std::llround((p[a] - grid.origin[a]) / h[a] * 1e5);
+        to[v] = seam.emplace(key, v).first->second;
+    }
+    for (auto& t : m.triangles)
+        for (uint32_t& v : t) v = to[v];
+}
+
 }  // namespace
 
-Mesh meshLattice(const Lattice& lat, const int cells[3], int res, size_t* droppedDegenerate) {
-    return Builder(lat, cells, res).run(droppedDegenerate);
+Mesh meshField(const Field& field, const Grid& grid, size_t* droppedDegenerate) {
+    Mesh m = Builder(field, grid).run(droppedDegenerate);
+    if (grid.periodic) weldPeriodic(m, grid);
+    return m;
 }
 
 ClosedCheck checkClosed(const Mesh& m) {

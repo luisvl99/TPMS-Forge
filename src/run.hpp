@@ -20,8 +20,9 @@ struct Options {
     double density = 0.2;
     double level = 0;
     bool hasLevel = false;
-    double cell[3] = {10, 10, 10};
-    int cells[3] = {2, 2, 2};
+    double cell[3] = {10, 10, 10};  // box and trimmed shapes
+    int cells[3] = {2, 2, 2};        // box and conformal shapes (along the parameter axes)
+    Shape shape;
     int res = 24;
     int patches = 3;
     double tol = 0;  // 0: 0.001 x smallest cell size
@@ -36,6 +37,21 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
 
 // The lattice the options describe; solves the iso level for --density.
 Lattice makeLattice(const Options& o);
+
+// The grid to mesh at `res` steps per cell: the box, the conformal
+// parameter box (periodic around), or the trimmed shape's bounds plus one
+// step of margin.
+Grid gridOf(const Options& o, int res);
+
+// Closed mesh of the exported region in mm (conformal shapes mapped).
+Mesh meshSolid(const Options& o, const Lattice& lat, int res, size_t* droppedDegenerate = nullptr);
+
+// Volume of the part's shape, mm^3.
+double shapeVolume(const Options& o);
+
+// Fraction of the shape volume inside the exported region, from
+// quasi-random samples of the field. Independent of any mesh.
+double sampledFraction(const Options& o, const Lattice& lat);
 
 // The exported pieces of a closed mesh: without cavities and fragments
 // smaller than minFragment x the largest piece.
