@@ -150,11 +150,15 @@ bool saveDialog(char* path, size_t size) {
 
 // Preview: the walls and the cut faces, built on a worker thread.
 struct Preview {
-    std::vector<float> tris;  // per vertex: x y z nx ny nz, in mm
+    static constexpr int kStride = 9;  // floats per vertex: x y z nx ny nz r g b, in mm
+    std::vector<float> tris;
     float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
-    bool solid = true, box = true;
+    bool box = true;
     std::string info, error;
 };
+
+// Solid gray; the fluid (void) blue, and for a sheet its second channel red.
+constexpr float kSolid[3] = {0.72f, 0.75f, 0.80f}, kBlue[3] = {0.40f, 0.66f, 0.82f}, kRed[3] = {0.85f, 0.42f, 0.38f};
 
 Preview buildPreview(const std::vector<std::string>& args) {
     Preview p;
@@ -170,7 +174,12 @@ Preview buildPreview(const std::vector<std::string>& args) {
     const double units = double(unit.steps[0]) * unit.steps[1] * unit.steps[2];
     const int res = std::clamp(int(std::cbrt(6e5 / units)), 6, 24);
     const Grid grid = gridOf(o, res);
-    p.solid = o.part == Part::Solid, p.box = shape.kind == ShapeKind::Box;
+    p.box = shape.kind == ShapeKind::Box;
+    // The void of a sheet is two channels, f > c and f < -c, one on each
+    // side of the sheet: blue and red. A network's void is one: blue.
+    const bool solid = o.part == Part::Solid, channels = !solid && lat.form == Form::Sheet;
+    const float* color = solid ? kSolid : kBlue;
+    auto channel = [&](Vec3 q) { return !channels || open.value(q.x, q.y, q.z) > 0 ? kBlue : kRed; };
 
     double h = 1e300;
     for (int a = 0; a < 3; ++a) h = std::min(h, grid.size[a] / grid.steps[a]);
@@ -187,18 +196,20 @@ Preview buildPreview(const std::vector<std::string>& args) {
     const Field openField = [&](double x, double y, double z) { return open(x, y, z); };
     const Field shapeField = [&](double x, double y, double z) { return shape.inside(x, y, z); };
 
-    // A point and normal in mm.
+    // A point and normal in mm, in the current color.
     auto emitMm = [&](Vec3 q, Vec3 n) {
         n = n * (1.0 / std::max(norm(n), 1e-30));
-        p.tris.insert(p.tris.end(), {float(q.x), float(q.y), float(q.z), float(n.x), float(n.y), float(n.z)});
+        p.tris.insert(p.tris.end(), {float(q.x), float(q.y), float(q.z), float(n.x), float(n.y), float(n.z), color[0],
+                                     color[1], color[2]});
     };
     // A point and normal in grid space, mapped to mm.
     auto emit = [&](Vec3 q, Vec3 n) {
         if (shape.conformal()) n = shape.gradient(q, n), q = shape.map(q);
         emitMm(q, n);
     };
-    // The part of a triangle where g < 0, with interpolated normals.
-    auto clipEmit = [&](const Vec3 q[3], const Vec3 n[3], const double g[3]) {
+    // The part of a triangle where g < 0, with interpolated normals. A cut
+    // face takes the color of the fluid channel it closes.
+    auto clipEmit = [&](const Vec3 q[3], const Vec3 n[3], const double g[3], bool cut) {
         Vec3 pq[4], pn[4];
         int m = 0;
         for (int k = 0; k < 3; ++k) {
@@ -209,6 +220,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
                 pq[m] = q[k] + (q[l] - q[k]) * t, pn[m++] = n[k] + (n[l] - n[k]) * t;
             }
         }
+        if (cut && m && !solid) color = channel((pq[0] + pq[m / 2]) * 0.5);
         for (int k = 1; k + 1 < m; ++k) emit(pq[0], pn[0]), emit(pq[k], pn[k]), emit(pq[k + 1], pn[k + 1]);
     };
     auto onGridFace = [&](const Vec3& a, const Vec3& b, const Vec3& c) {
@@ -225,6 +237,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
     std::vector<double> levels = {lat.level};
     if (lat.form == Form::Sheet) levels.push_back(-lat.level);
     for (double c : levels) {
+        if (!solid) color = channels && c < 0 ? kRed : kBlue;  // the wall f = c bounds the channel beyond it
         Lattice wall = open;
         wall.form = Form::Network, wall.part = Part::Solid, wall.level = c;
         const Mesh m = meshField([&](double x, double y, double z) { return wall(x, y, z); }, grid);
@@ -246,7 +259,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
             double g[3] = {-1, -1, -1};
             if (shape.trimmed())
                 for (int k = 0; k < 3; ++k) g[k] = shape.inside(q[k].x, q[k].y, q[k].z);
-            clipEmit(q, n, g);
+            clipEmit(q, n, g, false);
         }
     }
 
@@ -267,7 +280,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
                         double g[3];
                         for (int c = 0; c < 3; ++c)
                             n[c] = gradient(shapeField, q[c]), g[c] = open(q[c].x, q[c].y, q[c].z);
-                        clipEmit(q, n, g);
+                        clipEmit(q, n, g, true);
                     }
         }
     } else {
@@ -297,7 +310,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
                     const double gq[3] = {g[size_t(j0) * size_t(nu + 1) + size_t(i0)],
                                           g[size_t(j1) * size_t(nu + 1) + size_t(i1)],
                                           g[size_t(j2) * size_t(nu + 1) + size_t(i2)]};
-                    clipEmit(q, ns, gq);
+                    clipEmit(q, ns, gq, true);
                 };
                 for (int j = 0; j < nv; ++j)
                     for (int i = 0; i < nu; ++i) cell(i, j, i + 1, j, i + 1, j + 1), cell(i, j, i + 1, j + 1, i, j + 1);
@@ -308,13 +321,14 @@ Preview buildPreview(const std::vector<std::string>& args) {
         return p;
     }
     for (int a = 0; a < 3; ++a) p.lo[a] = 1e30f, p.hi[a] = -1e30f;
-    for (size_t i = 0; i < p.tris.size(); i += 6)
+    for (size_t i = 0; i < p.tris.size(); i += Preview::kStride)
         for (int a = 0; a < 3; ++a) p.lo[a] = std::min(p.lo[a], p.tris[i + a]), p.hi[a] = std::max(p.hi[a], p.tris[i + a]);
 
     const double frac = sampledFraction(o, lat);
     char b[200];
-    std::snprintf(b, sizeof b, "Preview: %zu triangles (%d steps per cell), solid fraction %.3f", p.tris.size() / 18, res,
-                  p.solid ? frac : 1 - frac);
+    std::snprintf(b, sizeof b, "Preview: %zu triangles (%d steps per cell), solid fraction %.3f%s",
+                  p.tris.size() / (3 * Preview::kStride), res, solid ? frac : 1 - frac,
+                  channels ? ". Fluid: two channels, blue and red" : "");
     p.info = b;
     return p;
 }
@@ -343,11 +357,15 @@ GLuint compile(Preview& p, GLuint old) {
     if (p.tris.empty()) return 0;
     const GLuint list = glGenLists(1);
     glNewList(list, GL_COMPILE);
+    const GLsizei stride = Preview::kStride * sizeof(float);
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_NORMAL_ARRAY);
-    glVertexPointer(3, GL_FLOAT, 6 * sizeof(float), p.tris.data());
-    glNormalPointer(GL_FLOAT, 6 * sizeof(float), p.tris.data() + 3);
-    glDrawArrays(GL_TRIANGLES, 0, GLsizei(p.tris.size() / 6));
+    glEnableClientState(GL_COLOR_ARRAY);
+    glVertexPointer(3, GL_FLOAT, stride, p.tris.data());
+    glNormalPointer(GL_FLOAT, stride, p.tris.data() + 3);
+    glColorPointer(3, GL_FLOAT, stride, p.tris.data() + 6);
+    glDrawArrays(GL_TRIANGLES, 0, GLsizei(p.tris.size() / Preview::kStride));
+    glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_NORMAL_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
     glEndList();
@@ -397,9 +415,7 @@ void drawScene(const Preview& p, GLuint list, const Camera& cam, int x, int y, i
     glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, specular);
     glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 40);
     glEnable(GL_COLOR_MATERIAL);
-    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
-    if (p.solid) glColor3f(0.72f, 0.75f, 0.80f);
-    else glColor3f(0.40f, 0.66f, 0.82f);
+    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);  // the colors come with the vertices
     glCallList(list);
     glDisable(GL_LIGHTING);
 

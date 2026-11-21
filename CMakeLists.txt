@@ -13,7 +13,12 @@ option(TPMS_GUI "Build tpms-gui (downloads Dear ImGui and GLFW)" ON)
 add_library(tpmscore STATIC src/run.cpp src/mesher.cpp src/export.cpp src/smooth.cpp)
 target_include_directories(tpmscore PUBLIC src)
 find_package(OpenMP)
-if(OpenMP_CXX_FOUND)
+if(OpenMP_CXX_FOUND AND MINGW)
+  # The imported target links libgomp.dll.a. With -static (below) these link
+  # libgomp.a and the libdl.a it needs, so the .exe needs no MinGW DLL.
+  target_compile_options(tpmscore PUBLIC -fopenmp)
+  target_link_libraries(tpmscore PUBLIC gomp dl pthread)
+elseif(OpenMP_CXX_FOUND)
   target_link_libraries(tpmscore PUBLIC OpenMP::OpenMP_CXX)
 endif()
 

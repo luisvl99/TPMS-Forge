@@ -144,17 +144,24 @@ int cubicBasis(const std::vector<double>& U, double t, double N[4]) {
 // matrix: A[i * (w + 1) + (j - i)] holds A(i, j) for i <= j <= i + w.
 bool bandSolve(std::vector<double> A, size_t n, size_t w, std::vector<double>& b) {
     auto at = [&](size_t i, size_t j) -> double& { return A[i * (w + 1) + (j - i)]; };
-    for (size_t i = 0; i < n; ++i)
-        for (size_t j = i; j < std::min(n, i + w + 1); ++j) {
-            double s = at(i, j);
-            for (size_t k = j > w ? j - w : 0; k < i; ++k) s -= at(k, i) * at(k, j);
-            if (j > i) at(i, j) = s / at(i, i);
-            else if (s > 0) at(i, i) = std::sqrt(s);
-            else return false;
-        }
+    // A = U^T U, row by row: each row updates the rows below it in its band,
+    // so all accesses run along rows (several times faster than columns).
     for (size_t i = 0; i < n; ++i) {
-        for (size_t k = i > w ? i - w : 0; k < i; ++k) b[i] -= at(k, i) * b[k];
+        const size_t end = std::min(n, i + w + 1);
+        if (at(i, i) <= 0) return false;
+        const double d = at(i, i) = std::sqrt(at(i, i));
+        for (size_t j = i + 1; j < end; ++j) at(i, j) /= d;
+        for (size_t r = i + 1; r < end; ++r) {
+            const double f = at(i, r);
+            if (f == 0) continue;
+            double* row = &at(r, r);
+            const double* src = &at(i, r);
+            for (size_t c = 0; c < end - r; ++c) row[c] -= f * src[c];
+        }
+    }
+    for (size_t i = 0; i < n; ++i) {
         b[i] /= at(i, i);
+        for (size_t j = i + 1; j < std::min(n, i + w + 1); ++j) b[j] -= at(i, j) * b[i];
     }
     for (size_t i = n; i-- > 0;) {
         for (size_t j = i + 1; j < std::min(n, i + w + 1); ++j) b[i] -= at(i, j) * b[j];
@@ -307,8 +314,9 @@ public:
         // the same patches and their vertices can be welded.
         for (size_t w = 0; w < walls_.size(); ++w) {
             phi_.emplace_back(size_t(sxy_ * (N_[2] + 1)));
-            int i[3];
-            for (i[2] = 0; i[2] <= N_[2]; ++i[2])
+#pragma omp parallel for schedule(static)
+            for (int z = 0; z <= N_[2]; ++z) {
+                int i[3] = {0, 0, z};
                 for (i[1] = 0; i[1] <= N_[1]; ++i[1])
                     for (i[0] = 0; i[0] <= N_[0]; ++i[0]) {
                         int k[3] = {i[0], i[1], i[2]};
@@ -316,6 +324,7 @@ public:
                             if ((periodic_ >> a & 1) && k[a] == N_[a]) k[a] = 0;
                         phi_[w][size_t(node(i))] = phi(int(w), nodePos(k));
                     }
+            }
         }
     }
 
@@ -386,19 +395,28 @@ public:
         }
         spline_ = Spline(n);
         const Spline& sp = spline_;
-        for (Edge& e : edges_)
-            if (e.wall >= 0) sampleEdge(e, sp);
+        // Each edge and each patch writes only its own samples: in parallel.
+        const int ne = int(edges_.size()), np = int(patches_.size());
+#pragma omp parallel for schedule(dynamic, 64)
+        for (int e = 0; e < ne; ++e)
+            if (edges_[size_t(e)].wall >= 0) sampleEdge(edges_[size_t(e)], sp);
+        std::vector<double> errs(patches_.size()), vols(patches_.size());
+#pragma omp parallel for schedule(dynamic, 16)
+        for (int k = 0; k < np; ++k) {
+            errs[size_t(k)] = fitPatch(patches_[size_t(k)], sp);
+            vols[size_t(k)] = patchVolume(patches_[size_t(k)]);
+        }
         faces_.clear();
         double maxErr = 0;
         for (size_t k = 0; k < patches_.size(); ++k) {
-            maxErr = std::max(maxErr, fitPatch(patches_[k], sp));
+            maxErr = std::max(maxErr, errs[k]);
             Face f;
             f.patch = int(k);
             Loop loop;
             for (int c = 0; c < 4; ++c)
                 loop.push_back({patches_[k].e[size_t(c)], edges_[size_t(patches_[k].e[size_t(c)])].a == patches_[k].v[size_t(c)]});
             f.loops.push_back(loop);
-            f.volume = patchVolume(patches_[k]);
+            f.volume = vols[k];
             faces_.push_back(f);
         }
         for (int F = 0; F < 6; ++F)
@@ -534,12 +552,14 @@ public:
                 for (const auto& [e, same] : l) edgeFaces_[size_t(e)].push_back({int(f), same});
         pn_.assign(np, {});
         pnbr_.assign(np, {});
-        for (size_t k = 0; k < np; ++k) {
-            for (const auto& row : patches_[k].pts)
-                for (const Vec3& p : row) pn_[k].push_back(normal(patches_[k].wall, p));
-            for (int e : patches_[k].e)
+#pragma omp parallel for schedule(dynamic, 64)
+        for (int k = 0; k < int(np); ++k) {
+            const Patch& p = patches_[size_t(k)];
+            for (const auto& row : p.pts)
+                for (const Vec3& q : row) pn_[size_t(k)].push_back(normal(p.wall, q));
+            for (int e : p.e)
                 for (const auto& [f, same] : edgeFaces_[size_t(e)])
-                    if (f != int(k) && f < int(np)) pnbr_[k].push_back(f);
+                    if (f != k && f < int(np)) pnbr_[size_t(k)].push_back(f);
         }
 
         // Regions; a region that does not fit is clustered again with a
@@ -551,28 +571,36 @@ public:
                 if (patches_[k].wall == w) members.push_back(int(k));
             for (auto& c : cluster(members, std::cos(kStart))) work.push_back({c, kStart});
         }
+        // In rounds: the regions of a round are fitted in parallel, then the
+        // ones that did not fit are split for the next round.
         std::vector<Face> regions;
         std::vector<int> regionOf(faces_.size(), -1);
         maxErr = 0;
         while (!work.empty()) {
-            auto [members, angle] = work.back();
-            work.pop_back();
-            Face r;
-            const bool fitted = fitRegion(members, tol, r, maxErr);
-            if (!fitted && members.size() == 1) {  // too curved for a height field: keep the patch surface
-                r = faces_[size_t(members[0])];
-            }
-            if (fitted || members.size() == 1) {
+            const int nw = int(work.size());
+            std::vector<Face> fit(work.size());
+            std::vector<double> err(work.size(), 0.0);
+            std::vector<char> fitted(work.size());
+#pragma omp parallel for schedule(dynamic)
+            for (int i = 0; i < nw; ++i)
+                fitted[size_t(i)] = fitRegion(work[size_t(i)].first, tol, fit[size_t(i)], err[size_t(i)]);
+            std::vector<std::pair<std::vector<int>, double>> next;
+            for (size_t i = 0; i < work.size(); ++i) {
+                const auto& [members, angle] = work[i];
+                maxErr = std::max(maxErr, err[i]);
+                if (!fitted[i] && members.size() > 1) {
+                    const double smaller = angle - kStep;
+                    if (smaller > 0)
+                        for (auto& c : cluster(members, std::cos(smaller))) next.push_back({c, smaller});
+                    else
+                        for (int p : members) next.push_back({{p}, smaller});
+                    continue;
+                }
+                // A single patch too curved for a height field keeps its own surface.
                 for (int p : members) regionOf[size_t(p)] = int(regions.size());
-                regions.push_back(r);
-                continue;
+                regions.push_back(fitted[i] ? fit[i] : faces_[size_t(members[0])]);
             }
-            angle -= kStep;
-            std::vector<std::vector<int>> parts;
-            if (angle > 0) parts = cluster(members, std::cos(angle));
-            else
-                for (int p : members) parts.push_back({p});
-            for (auto& c : parts) work.push_back({c, angle});
+            work.swap(next);
         }
         for (size_t f = np; f < faces_.size(); ++f) regionOf[f] = int(regions.size() + f);
 
@@ -1048,7 +1076,7 @@ private:
                     add(ia, second, 3, 1e-5, 0.0);
                     add(ib, second, 3, 1e-5, 0.0);
                 }
-            if (!bandSolve(A, n, w, h)) return false;
+            if (!bandSolve(std::move(A), n, w, h)) return false;
 
             // Height difference at each data point. It bounds the distance to
             // the data, so a fit cannot pass by touching another sheet.

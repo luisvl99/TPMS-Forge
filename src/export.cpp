@@ -1,6 +1,7 @@
 #include "export.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
@@ -31,18 +32,14 @@ bool writeStl(const std::string& path, const std::vector<Mesh>& parts) {
     return std::fclose(f) == 0 && ok;
 }
 
-// STEP REAL: always has a decimal point, e.g. "0.", "1.5", "1.E-07".
+// STEP REAL: always has a decimal point, e.g. "0.", "1.5", "1.E-07". Like
+// "%.12G", but to_chars is several times faster (merged files hold millions).
 std::string real(double v) {
     char buf[32];
-    std::snprintf(buf, sizeof buf, "%.12G", v);
-    std::string s(buf);
-    if (s.find('.') == std::string::npos) {
-        const auto e = s.find('E');
-        if (e == std::string::npos)
-            s += '.';
-        else
-            s.insert(e, ".");
-    }
+    std::string s(buf, std::to_chars(buf, buf + sizeof buf, v, std::chars_format::general, 12).ptr);
+    const auto e = s.find('e');
+    if (e != std::string::npos) s[e] = 'E';
+    if (s.find('.') == std::string::npos) s.insert(e == std::string::npos ? s.size() : e, ".");
     return s;
 }
 

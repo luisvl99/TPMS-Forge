@@ -185,12 +185,19 @@ struct Shape {
 
     // Conformal: columns of the Jacobian of map() at p.
     void jacobian(Vec3 p, Vec3 J[3]) const {
-        const double h = 1e-6;
-        for (int k = 0; k < 3; ++k) {
-            Vec3 q = p, r = p;
-            q[k] += h, r[k] -= h;
-            J[k] = (map(q) - map(r)) * (0.5 / h);
+        const double r = radius(p.x), a = kTwoPi * p.y / cells[1];
+        const double dr = (logRadial ? r * std::log(r1 / r0) : r1 - r0) / cells[0];
+        const double ca = std::cos(a), sa = std::sin(a), da = kTwoPi / cells[1];
+        if (kind == ShapeKind::Tube) {
+            J[0] = Vec3{ca, sa, 0} * dr;
+            J[1] = Vec3{-sa, ca, 0} * (r * da);
+            J[2] = {0, 0, height / cells[2]};
+            return;
         }
+        const double b = kTwoPi * p.z / cells[2], cb = std::cos(b), sb = std::sin(b);
+        J[0] = Vec3{cb * ca, cb * sa, sb} * dr;
+        J[1] = Vec3{-sa, ca, 0} * ((major + r * cb) * da);
+        J[2] = Vec3{-sb * ca, -sb * sa, cb} * (r * kTwoPi / cells[2]);
     }
 
     // Conformal: a field gradient g in parameter space as the gradient in mm,

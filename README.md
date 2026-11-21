@@ -11,7 +11,7 @@
 Run `build/tpms-gui`.
 
 - **Left panel:** every option of the command line, grouped as Surface, Shape and Export. Numbers are typed (with − / + buttons) and clamped to valid values. Options that do not apply to the chosen output file are hidden: mesh resolution for STEP, patches and tolerance for STL.
-- **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread in about half a second. Each wall (level set) is meshed on its own, so even very thin sheets show without holes; the cuts on the box faces come from a 2D grid 4 times finer. The line above the view gives the triangle count and the solid fraction (from quasi-random samples of the field, not from the preview mesh). Pieces that the export drops as fragments are still drawn. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
+- **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread in about half a second. Each wall (level set) is meshed on its own, so even very thin sheets show without holes; the cuts on the box faces come from a 2D grid 4 times finer. The line above the view gives the triangle count and the solid fraction (from quasi-random samples of the field, not from the preview mesh). Pieces that the export drops as fragments are still drawn. The solid is gray. The fluid (`--part void`) is blue; the fluid of a sheet is two separate channels, one on each side of the sheet (f > c and f < −c), drawn blue and red. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
 - **Export:** writes the file on a worker thread. The log shows the same report as the command line.
 - **Command line:** the equivalent `tpms` command, with a Copy button. Use it to repeat an export or to script one.
 
@@ -19,7 +19,7 @@ Run `build/tpms-gui`.
 
 ## Build
 
-You need a C++17 compiler and CMake 3.20 or newer. OpenMP is used when the compiler has it. The command-line tool has no other dependencies.
+You need a C++17 compiler and CMake 3.20 or newer. OpenMP is used when the compiler has it: patch fitting, merging and meshing run on all cores. The command-line tool has no other dependencies. With MinGW, OpenMP is linked statically, so the `.exe` files run without MinGW DLLs.
 
 `tpms-gui` uses Dear ImGui 1.91.5 and GLFW 3.4. CMake downloads them at configure time (pinned versions, SHA-256 checked). Turn the GUI off with `-DTPMS_GUI=OFF` to build only the command-line tool without downloads.
 
@@ -145,10 +145,10 @@ Curved shapes at density 0.3, merged faces: a tube (radius 10 to 20 mm, 10 mm lo
 | Faces, merged (`--exact`) | tube, 1 x 6 x 1 cells | torus shell, 1 x 12 x 4 cells |
 |---|---|---|
 | gyroid sheet | 354 (1 262) | 3 302 (8 582) |
-| Schwarz P sheet | 189 (952) | 1 739 (6 880) |
-| FRD sheet | 1 637 (10 578) | 13 354 (80 868) |
+| Schwarz P sheet | 187 (952) | 1 733 (6 880) |
+| FRD sheet | 1 631 (10 578) | 13 397 (80 868) |
 
-A torus shell takes 10–160 s, most of it in merging.
+On 20 cores, the gyroid torus shell takes 2 s and the FRD sheet torus shell (80 868 patches, a 494 MB file) 48 s.
 
 | Faces, 2 x 2 x 2 cells, density 0.3 | `--exact` | merged |
 |---|---|---|
