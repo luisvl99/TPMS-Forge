@@ -463,22 +463,25 @@ int main(int argc, char** argv) {
         ImGui::Combo("Form", &s.form, "Sheet   |f| <= c\0Network   f <= c\0");
         ImGui::Combo("Part", &s.part, "Solid\0Void (fluid domain)\0");
         ImGui::Combo("Thickness by", &s.thickness, "Solid fraction\0Iso level c\0");
-        if (s.thickness == 0) ImGui::SliderFloat("Solid fraction", &s.density, 0.02f, 0.95f, "%.3f");
-        else ImGui::DragFloat("Iso level c", &s.level, 0.005f, -10, 10, "%.4f");
+        // Numbers are typed, with +/- steps; values are clamped to what tpms accepts.
+        if (s.thickness == 0) ImGui::InputFloat("Solid fraction", &s.density, 0.01f, 0.05f, "%.3f");
+        else ImGui::InputFloat("Iso level c", &s.level, 0.01f, 0.1f, "%.4f");
+        s.density = std::clamp(s.density, 0.01f, 0.99f);
 
         ImGui::SeparatorText("Box");
         ImGui::Checkbox("Cubic cell", &s.cubic);
         if (s.cubic) {
-            ImGui::DragFloat("Cell size (mm)", &s.cell[0], 0.1f, 0.1f, 1000, "%.2f");
+            ImGui::InputFloat("Cell size (mm)", &s.cell[0], 1, 5, "%.2f");
             s.cell[1] = s.cell[2] = s.cell[0];
         } else {
-            ImGui::DragFloat3("Cell size (mm)", s.cell, 0.1f, 0.1f, 1000, "%.2f");
+            ImGui::InputFloat3("Cell size (mm)", s.cell, "%.2f");
         }
-        ImGui::DragInt3("Cells x y z", s.cells, 0.05f, 1, 50);
-        for (int k = 0; k < 3; ++k) s.cells[k] = std::max(1, s.cells[k]), s.cell[k] = std::max(0.1f, s.cell[k]);
+        ImGui::InputInt3("Cells x y z", s.cells);
+        for (int k = 0; k < 3; ++k) s.cells[k] = std::clamp(s.cells[k], 1, 100), s.cell[k] = std::max(0.1f, s.cell[k]);
         ImGui::TextDisabled("Box %g x %g x %g mm", s.cells[0] * s.cell[0], s.cells[1] * s.cell[1],
                             s.cells[2] * s.cell[2]);
-        ImGui::DragFloat("Min fragment", &s.minFragment, 0.001f, 0, 0.5f, "%.3f");
+        ImGui::InputFloat("Min fragment", &s.minFragment, 0.005f, 0.05f, "%.3f");
+        s.minFragment = std::clamp(s.minFragment, 0.0f, 1.0f);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Drop pieces smaller than this fraction of the largest piece (cut off by the box).");
 
