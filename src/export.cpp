@@ -97,10 +97,26 @@ long writeSolid(StepFile& st, const Mesh& m, const std::string& name,
             edges.emplace(key(lo, hi), Edge{curve, dir});
         }
 
-    std::vector<long> faces;
-    faces.reserve(m.triangles.size());
+    // Shells: connected sets of triangles. The one with positive volume is
+    // the outside; the others are inner cavities, written as voids: their
+    // triangles turned around, so each shell bounds its cavity, and the solid
+    // refers to it reversed.
+    std::vector<uint32_t> parent(m.vertices.size());
+    for (uint32_t v = 0; v < parent.size(); ++v) parent[v] = v;
+    auto find = [&](uint32_t v) {
+        while (parent[v] != v) v = parent[v] = parent[parent[v]];
+        return v;
+    };
+    for (const auto& t : m.triangles) parent[find(t[1])] = find(t[0]), parent[find(t[2])] = find(t[0]);
+    std::unordered_map<uint32_t, double> shellVolume;
+    for (const auto& t : m.triangles)
+        shellVolume[find(t[0])] += dot(m.vertices[t[0]], cross(m.vertices[t[1]], m.vertices[t[2]]));
+
+    std::unordered_map<uint32_t, std::vector<long>> faces;
     for (size_t ti = 0; ti < m.triangles.size(); ++ti) {
-        const auto& t = m.triangles[ti];
+        auto t = m.triangles[ti];
+        const uint32_t shell = find(t[0]);
+        if (shellVolume[shell] < 0) std::swap(t[1], t[2]);
         const Vec3 &a = m.vertices[t[0]], &b = m.vertices[t[1]], &c = m.vertices[t[2]];
         const Vec3 n = cross(b - a, c - a);
         const long normal = st.add("DIRECTION(''," + triple(n * (1.0 / norm(n))) + ")");
@@ -118,10 +134,17 @@ long writeSolid(StepFile& st, const Mesh& m, const std::string& name,
         const long loopId = st.add(loop + "))");
         const long bound = st.add("FACE_OUTER_BOUND(''," + ref(loopId) + ",.T.)");
         const std::string faceName = triangleName ? quoted(triangleName(ti)) : "''";
-        faces.push_back(st.add("ADVANCED_FACE(" + faceName + ",(" + ref(bound) + ")," + ref(plane) + ",.T.)"));
+        faces[shell].push_back(st.add("ADVANCED_FACE(" + faceName + ",(" + ref(bound) + ")," + ref(plane) + ",.T.)"));
     }
-    const long shell = st.add("CLOSED_SHELL(''," + refList(faces) + ")");
-    return st.add("MANIFOLD_SOLID_BREP(" + quoted(name) + "," + ref(shell) + ")");
+    long outer = 0;
+    std::vector<long> voids;
+    for (const auto& [shell, fs] : faces) {
+        const long id = st.add("CLOSED_SHELL(''," + refList(fs) + ")");
+        if (shellVolume[shell] > 0) outer = id;
+        else voids.push_back(st.add("ORIENTED_CLOSED_SHELL('',*," + ref(id) + ",.F.)"));
+    }
+    if (voids.empty()) return st.add("MANIFOLD_SOLID_BREP(" + quoted(name) + "," + ref(outer) + ")");
+    return st.add("BREP_WITH_VOIDS(" + quoted(name) + "," + ref(outer) + "," + refList(voids) + ")");
 }
 
 }  // namespace

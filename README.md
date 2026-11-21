@@ -2,7 +2,7 @@
 
 `tpms` turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface. There is a command-line tool, `tpms`, and a desktop app with a live 3D preview, `tpms-gui`.
 
-**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube or torus shell with cells that follow the curvature (smooth STEP too), or a cylinder, sphere or torus cut from a straight lattice (STL and faceted STEP so far). Density and cell size can be graded, and a property report gives volumes, wetted area, hydraulic diameters and wall thickness for CFD and FEA.
+**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube or torus shell with cells that follow the curvature, or a cylinder, sphere or torus cut from a straight lattice; every shape has smooth STEP. Density and cell size can be graded, and a property report gives volumes, wetted area, hydraulic diameters and wall thickness for CFD and FEA.
 
 ![tpms-gui](docs/gui.png)
 
@@ -42,7 +42,7 @@ Gyroid sheet, 25 % solid, 4 x 4 x 4 cells of 8 mm, written as STEP and STL:
 build/tpms --type gyroid --form sheet --density 0.25 --cell 8 --cells 4 -o gyroid.step -o gyroid.stl
 ```
 
-Fluid domain for CFD (the box minus the solid) of the same lattice:
+Fluid domain for CFD (the box minus the solid) of the same lattice. A sheet's fluid is two channels, one on each side of the sheet, so this writes `gyroid_fluid_A.step` and `gyroid_fluid_B.step`:
 
 ```bash
 build/tpms --type gyroid --form sheet --density 0.25 --cell 8 --cells 4 --part void -o gyroid_fluid.step
@@ -84,6 +84,22 @@ Sandwich panel: the lattice with 1.5 mm plates on top and bottom:
 build/tpms --plates z 1.5 -o panel.step
 ```
 
+Cross-flow heat exchanger: channel A flows along x, channel B along y, each with 10 mm inlet and outlet buffers behind 1 mm header plates. The fluid goes to `hx_fluid_A.step` and `hx_fluid_B.step`; the solid, with the plates, to `hx_solid.step`:
+
+```bash
+build/tpms --part void --channel-buffers x y 10 1 -o hx_fluid.step
+```
+
+```bash
+build/tpms --channel-buffers x y 10 1 -o hx_solid.step
+```
+
+Report with mass, stiffness and pressure drop estimates for Ti-6Al-4V (4430 kg/m³, 114 GPa) and water at 0.1 m/s, as CSV:
+
+```bash
+build/tpms --material 4430 114 --flow 0.1 --report -o report.csv
+```
+
 Run `build/tpms --help` for all options. Run `build/tpms --list` for all surface types.
 
 ## Surface types
@@ -105,7 +121,7 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 - `--form sheet` is the region |f| ≤ c: a wall around the surface. The wall thickness comes from the level set, so it is not exactly constant.
 - `--form network` is the region f ≤ c: one of the two channel networks.
 - `--density R` finds c so that one unit cell has solid volume fraction R. It always means the solid fraction, also with `--part void`.
-- `--part void` exports the shape minus the solid. Use it as the fluid domain for CFD. A sheet lattice in a box has two separate fluid regions, so you get two solids.
+- `--part void` exports the shape minus the solid. Use it as the fluid domain for CFD. A sheet's fluid is two separate channels, f > c (A) and f < −c (B). In STEP, each channel goes to a file of its own: `-o x.step` writes `x_A.step` and `x_B.step` (smooth and `--faceted`). If a solid lies in both channels, as with `--buffers`, which join them, the tool writes one file and says why. STL keeps both channels in one file. The faceted path meshes each channel on its own, so a sheet thinner than the grid cannot join them.
 
 ## Grading
 
@@ -135,6 +151,19 @@ For the box, a slab can be fused onto the faces at the start and end of one axis
 
 The slabs lie outside the lattice box, which keeps its size. In smooth STEP, the cut face under a slab becomes its complement (what the slab still shows to the other side), and the slab adds its outer face and four side faces, all planes. Reported solid fractions are of the lattice box; the volume check includes the slabs. They work with STL and faceted STEP too, not with `--unit-cell` or `--cell-grade`.
 
+## Channel buffers (heat exchangers)
+
+A sheet's fluid is two channels that never meet: A (f > c) and B (f < −c). `--channel-buffers A B L [T]` gives each its own inlet and outlet, for a two-fluid heat exchanger in cross flow:
+
+- Channel A flows along axis A, channel B along axis B (x, y or z, different).
+- On the two faces across its axis, each channel gets a header plate T mm thick (default 1) and, beyond it, a buffer L mm long. The plate has holes exactly where its channel opens on the face (the face's pattern, extruded), and closes the other channel there.
+- `--part void` writes channel A with its holes and buffers to `NAME_A.step`, and channel B to `NAME_B.step`: one fluid region per file, ready for CFD. `--part solid` writes the lattice fused with the four plates.
+- The three parts fill the box, plates and buffers without gaps or overlaps: in OpenCASCADE, the solid's and both fluids' volumes add up to within 0.2 mm³ of the 17 600 mm³ of a 20 mm box with 1 mm plates and 5 mm buffers.
+
+Names for the setup: the buffer's end face is the port (`x-` and `x+` for channel A along x); the plates' faces and the hole walls are `wall A` or `wall B`, after the channel they face; the plate faces that close the other channel on the box face are that channel's wall. The two faces across the third axis stay open cut faces (`z-`, `z+` here): set them as walls, symmetry or periodic.
+
+In smooth STEP each hole wall is one ruled B-spline face per run of the channel's boundary on the face (from the edge of the face back to it, or around a loop), fitted within `--tol` / 4; the plate faces and buffer faces are planes. Channel buffers need a box with a sheet, and work with STL and faceted STEP too, not with `--unit-cell`, `--cell-grade`, `--plates` or `--buffers`.
+
 ## Names in the STEP file
 
 Solids and faces carry names, to pick boundaries in CAD, CFD and FEA:
@@ -142,16 +171,18 @@ Solids and faces carry names, to pick boundaries in CAD, CFD and FEA:
 | Name | What |
 |---|---|
 | `solid`, `fluid`, `fluid A`, `fluid B` | solids: the part; a sheet's fluid channels are A (f > c) and B (f < −c). More pieces get `2`, `3`, ... |
-| `wall`, `wall A`, `wall B` | walls between solid and fluid; on a sheet, A and B tell which channel they face |
-| `x-`, `x+`, `y-`, `y+`, `z-`, `z+` | box faces (the outer faces of plates and buffers too: the inlet of `--buffers x` is `x-`) |
+| `wall`, `wall A`, `wall B` | walls between solid and fluid; on a sheet, A and B tell which channel they face (with channel buffers also the header plates and their holes) |
+| `x-`, `x+`, `y-`, `y+`, `z-`, `z+` | box faces (the outer faces of plates and buffers too: the inlet of `--buffers x` is `x-`, and with `--channel-buffers x y` channel A's ports are `x-` and `x+`) |
 | `inner`, `outer`, `bottom`, `top` | tube and torus shell faces |
-| `side`, `bottom`, `top`, `surface` | trimmed shapes (faceted STEP) |
+| `side`, `bottom`, `top`, `surface` | trimmed shapes: cylinder side and ends, sphere and torus surface |
 
 The names are written on the STEP items (`MANIFOLD_SOLID_BREP`, `ADVANCED_FACE`). Readers differ in what they import: OpenCASCADE reads them with `read.stepcaf.subshapes.name` on; a single solid often takes the file (product) name instead.
 
 ## Property report
 
-`--report` prints the properties of the solid and the fluid (void), whatever `--part` exports. An output ending in `.json` gets the same report as JSON. The GUI shows it in its own window.
+`--report` prints the properties of the solid and the fluid (void), whatever `--part` exports. An output ending in `.json` gets the same report as JSON, one ending in `.csv` a header line and one line of values with fixed columns (rows of several runs line up, for parameter sweeps). The GUI shows it in its own window, with optional inputs and buttons to save JSON or CSV.
+
+Optional inputs: `--material RHO [E]`, the solid's density in kg/m³ and Young's modulus in GPa; `--flow U [MU RHO]`, the superficial (inlet) velocity in m/s, and the fluid's viscosity in Pa s and density in kg/m³ (default water, 0.001 and 998).
 
 | Value | Meaning |
 |---|---|
@@ -162,6 +193,10 @@ The names are written on the STEP items (`MANIFOLD_SOLID_BREP`, `ADVANCED_FACE`)
 | Channels | a sheet's fluid is two channels, f > c and f < −c, one on each side of the sheet; each gets its own volume, wetted area and hydraulic diameter |
 | Wall thickness (sheet) | mean 2 × solid volume / wetted area, and the local range 2 c / \|∇f\| on the walls |
 | Solid size (network) | 4 × solid volume / wetted area, like a strut diameter |
+| Mass | solid volume × density, g (with `--material`) |
+| Stiffness E/Es | Gibson–Ashby bounds at solid fraction φ: φ² (bending-dominated) to φ/3 (stretching-dominated); sheets usually lie near the upper value, networks near the lower. In GPa with `--material ... E`. For a real value, simulate a `--unit-cell` |
+| Permeability | per fluid channel, Kozeny–Carman with Kozeny's constant 5: K = ε D_h² / 80 (ε the channel's porosity), m² |
+| Pressure drop | with `--flow`, per channel: the Reynolds number on D_h and the speed in the pores, and the pressure gradient μu/K (Darcy, viscous) + 7/6 ρu² / (ε² D_h) (Ergun's inertial term, with the packed bed's particle size written through D_h), in Pa/m and over the box along the flow axis (the channel's `--channel-buffers` or `--buffers` axis, else x). Rough packed-bed estimates for comparing designs: use CFD for design |
 | Pieces | each solid and fluid piece with its volume and the faces of the shape it touches |
 | Connects | for each pair of opposite faces (x− / x+, inner / outer, bottom / top), whether the solid and each fluid channel connect them: flow through for CFD, load path for FEA |
 
@@ -182,7 +217,7 @@ The values come from closed meshes at `--res` steps per cell; the fluid channels
 - **Trimmed** (cylinder, sphere, torus): a straight lattice of `--cell` cells, cut by the shape. Use this for solid shapes: bending cells around an axis or a pole would squeeze them to nothing there.
 - Round shapes are centered at the origin with their axis along z.
 - Bending stretches cells, and stretched walls are thicker, so the solid fraction differs from `--density` (which is per unit cell). The tool samples the field and prints the real value.
-- Smooth STEP works for the box, tube and torus shell. The faces where the lattice is cut are exact: cylinders and end planes for the tube, tori for the torus shell. For the trimmed shapes, use `.stl` or `--faceted` (or cut a box lattice in CAD).
+- Smooth STEP works for every shape. The faces where the lattice is cut are exact: cylinders and end planes for the tube and cylinder, tori for the torus shell and torus, a sphere for the sphere.
 
 Example: a gyroid tube, 15 to 25 mm radius, 30 mm long, 12 cells around:
 
@@ -192,7 +227,7 @@ build/tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.step
 
 ## STEP options
 
-- `--patches N` is the patch grid steps per unit cell edge to start from (default 3). Each step gives about one B-spline face per wall crossing. If the result fails a check, the tool tries N+1, N+2, … (up to 16, or N+7 if larger) and prints the value it used. FRD and Fischer-Koch S sheets need 8–11.
+- `--patches N` is the patch grid steps per unit cell edge to start from (default 3). Each step gives about one B-spline face per wall crossing. If the result fails a check, the tool tries N+1, N+2, … (up to 16, or N+7 if larger) and prints the value it used. FRD and Fischer-Koch S sheets need 8–11. An ungraded lattice repeats per cell, so the search runs on a single cell first, and the whole model then usually needs one try (the FRD torus shell below: 24 s → 16 s). For a trimmed shape, a step is about one cell at its outside.
 - `--tol T` is the max distance in mm between a face and the exact surface (default 0.001 × the smallest cell edge; for a tube or torus shell, the smallest bent cell).
 - `--exact` keeps one face per patch. Neighbor faces then share their edges exactly. Without it (the default), patches are merged into large trimmed faces, which gives 3–8 times fewer faces. Their edges lie within `--tol` of the faces instead of exactly on them (tolerant edges, as in most industrial STEP files).
 - `--faceted` writes the v0 STEP (one planar face per triangle) instead.
@@ -207,17 +242,23 @@ Both warn when:
 
 - the solid fraction of the result is more than 5 % away from what the field gives (sampled at quasi-random points). This usually means walls thinner than the grid: raise `--res` or `--patches`.
 - pieces were dropped. Small fragments cut off by the shape are dropped by default (`--min-fragment`), because a floating piece breaks an FEA or CFD setup.
-- inner cavities were found. The tool cannot write a solid with an inner cavity yet, so it drops the cavity shell and warns. This only happens at extreme levels, for example when a network breaks into separate blobs.
+- inner cavities were found inside no solid (this should not happen; the cavity is dropped). Inner cavities, for example isolated network blobs in the fluid, are written as voids of their solid (`BREP_WITH_VOIDS`). A cavity smaller than `--min-fragment` × the largest piece is filled, like a small fragment is dropped.
 
-`ctest` in the build folder runs each surface type (smooth STEP) and each shape (STL) once, and fails if the tool's own checks fail.
+`ctest` in the build folder runs each surface type and the special cases (smooth STEP) and each shape (STL) once, and fails if the tool's own checks fail. When a Python with `cadquery-ocp` is found (the project's `.venv`, or `-DTPMS_PYTHON=...`), every STEP test is also read back by OpenCASCADE with the checker below, and fails if a solid is invalid or open. CMake prints `OpenCASCADE checks: ON` when it found one.
 
 ## Checking a STEP file with OpenCASCADE
 
-[tools/check_step.py](tools/check_step.py) reads STEP files with OpenCASCADE. It reports the solid count, closed shells, face count, `BRepCheck_Analyzer` validity, volume and read time. It needs `cadquery-ocp`:
+[tools/check_step.py](tools/check_step.py) reads STEP files with OpenCASCADE. It reports the solid count, closed shells, face count, `BRepCheck_Analyzer` validity, volume and read time, and exits with 1 if a file is unreadable, invalid or open (or, with `--periodic`, if opposite faces differ). It needs `cadquery-ocp`, best in a `.venv` in the project folder, where `ctest` finds it:
 
 ```bash
-python -m pip install cadquery-ocp
+python -m venv .venv
 ```
+
+```bash
+.venv/Scripts/python -m pip install cadquery-ocp
+```
+
+(`.venv/bin/python` on Linux and macOS.)
 
 ```bash
 python tools/check_step.py lattice.step
@@ -233,7 +274,13 @@ Results for 2 x 2 x 2 cells at density 0.3 (sheet and network, solid and void):
 Curved shapes at density 0.3, merged faces: a tube (radius 10 to 20 mm, 10 mm long, 1 x 6 x 1 cells; all 28 cases) and a torus shell (radius 4 to 10 mm, major radius 25 mm, 1 x 12 x 4 cells; sheet solid and network void of each type):
 
 - Everything reads as valid closed solids except the Neovius sheets: some faces get edges that OpenCASCADE splits on reading. Use `--exact` for Neovius sheets on curved shapes until this is fixed. The volumes match the solid fraction the tool prints: for the gyroid sheet tube, solid 2 817.5 mm³ + void 6 607.3 mm³ = 9 424.8 mm³ = π (20² − 10²) × 10.
-- The Neovius network at this density is isolated blobs, so its void part has inner cavities. The tool drops them with a warning, as in the box.
+- The Neovius network at this density is isolated blobs, so its void part has inner cavities, written as voids.
+
+Trimmed shapes, merged faces (cylinder radius 10 mm, 20 mm long; sphere radius 10 mm; torus radius 6 mm, major radius 20 mm; 10 mm cells):
+
+- All read as valid closed solids, with volumes within 0.05 % of the tool's: gyroid, diamond and I-WP sheets, gyroid and Schwarz P networks, solid and fluid (fluid as two files per sheet).
+- The exception is the diamond sphere: a wall passes 0.3 mm from the center, where the spherical coordinates meet, and no patch count up to 16 fits it. With `--shift 0.13 0.21 0.07` it works (15 patches per cell).
+- They need more patches per cell than a box (4–15), so they are slower: the cylinder takes about a second, the sphere and torus from seconds to minutes (gyroid torus: 10 patches per cell, 580 faces, 49 s).
 
 | Faces, merged (`--exact`) | tube, 1 x 6 x 1 cells | torus shell, 1 x 12 x 4 cells |
 |---|---|---|
@@ -294,6 +341,17 @@ For a tube or torus shell, the same steps run in the parameter box (one unit per
 - Caps lie on exact `CYLINDRICAL_SURFACE`s (tube walls), `TOROIDAL_SURFACE`s (torus shell walls) or `PLANE`s (tube ends). Their edges along the shape's box edges (circles and straight lines) are B-spline curves within `tol` / 4, so the STEP uncertainty is `tol`. A curved cap keeps the seam as an edge it uses twice, as CAD seams are. A tube end is joined across the seam into an annulus with holes.
 - Volumes use a flux in the parameter box: Phi(u) with dPhi/du = det J, the volume stretch of the mapping. The flux through the closed patch and cap surfaces is the volume in mm, exact up to the face samples. On the seam the flux is zero, so no cap is needed there.
 
+For a cylinder, sphere or torus (trimmed shapes), the same steps run in a parameter box in cylindrical, spherical or toroidal coordinates (radius from the axis, the center line or the center, and angles), and the straight lattice is evaluated at the mapped point:
+
+- The outside of the parameter box becomes the caps: `CYLINDRICAL_SURFACE` and end `PLANE`s, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`. The angles wrap around as seams, as for the tube.
+- The faces at radius 0, and the sphere's poles, map to a line or a point. They get no caps: their vertices that map to one point are welded, and their zero-length edges dropped, so the patches there become triangles.
+- A cap around a pole of the sphere is written with its boundary circle alone, without the seam: CAD readers add the seam and the pole themselves.
+- The parameter box is distorted near the axis, so coarse patch grids fold there more often, and the search ends at higher patch counts than for a box (see the table below).
+
+Inner cavities: each shell with negative volume goes to the smallest solid around it (the parity of a ray through the patches and caps; with one solid, that one) and is written as a void of it, an `ORIENTED_CLOSED_SHELL` in a `BREP_WITH_VOIDS`.
+
+Channel buffers replace the caps on the faces across each channel's axis. The other channel's openings there are capped (facing the plate). The channel's own boundary on the face is walked as its cap would be, in runs from the edge of the face back to it, or loops; each run is fitted with one cubic curve within `tol` / 4 and extruded through the plate into a ruled B-spline face (degree 3 × 1) whose bottom edges are the walls' own edges. The run's edges, moved by the plate thickness, bound the plate's outer face (or the buffer's inner face) together with one line per stretch of the face's edge that the channel does not open on; the plate's sides and the buffer's sides share those lines and reach down to the face where a hole meets them.
+
 ### Faceted STEP and STL
 
 1. Sample the field on a regular grid. The field is |f| − c (sheet) or f − c (network); `--part void` uses its negative. The grid covers the box; for a tube or torus shell, the parameter box (one unit per cell); for a trimmed shape, its bounds plus one grid step, with the field cut by the shape (the larger of the two values).
@@ -301,19 +359,25 @@ For a tube or torus shell, the same steps run in the parameter box (one unit per
 3. Close the solid with planar caps on the box faces. Each face square is split along the same diagonal as the tetrahedra and clipped to the inside region. The caps reuse the surface vertices, so the mesh is watertight. Axes that wrap around (around a tube; around and along a torus shell) get no caps: their two ends are welded instead.
 4. Keep each surface vertex at least 2 % of a grid edge away from grid nodes. This prevents near-zero edges and does not change the mesh topology.
 5. For a tube or torus shell, map every vertex from the parameter box to mm. The mapping keeps orientation, so the mesh stays closed and outward.
-6. Split the mesh into connected solids and drop small fragments.
-7. Write STEP AP214 directly: `MANIFOLD_SOLID_BREP` → `CLOSED_SHELL` → `ADVANCED_FACE` on a `PLANE` per triangle, with shared `EDGE_CURVE`s. STL is binary.
+6. Split the mesh into connected solids and drop small fragments. An inner cavity stays with the solid around it (ray parity), and a tiny one is filled.
+7. Write STEP AP214 directly: `MANIFOLD_SOLID_BREP` (`BREP_WITH_VOIDS` with cavities) → `CLOSED_SHELL` → `ADVANCED_FACE` on a `PLANE` per triangle, with shared `EDGE_CURVE`s. STL is binary.
 
 ## Roadmap
 
 - **v1 (done):** smooth STEP with B-spline faces, error checked against the exact implicit function, shared boundary curves.
 - **v1 merged faces (done):** 3–8 times fewer faces through trimmed height-field regions.
-- **Next for v1:** test import in NX; fix merged Neovius sheets on curved shapes; inner cavities (`BREP_WITH_VOIDS`).
+- **Next for v1:** test import in NX; fix merged Neovius sheets on curved shapes.
 - **v2 (done):** GUI with every command-line option and a live preview.
 - **Curved shapes, phase 1 (done):** tube and torus shell with cells that follow the shape; trimmed cylinder, sphere and torus; preview, STL and faceted STEP.
 - **Curved shapes, phase 2 (done):** smooth STEP for the tube and torus shell, with exact cylinder, torus and plane caps.
 - **Graded lattices and property report (done):** graded solid fraction or level along an axis, graded cell size in a box, and the report.
 - **Unit cell (done):** periodic cells for homogenization, lattice offset.
 - **Names, plates and buffers (done):** named solids and faces; plates and inlet/outlet buffers on the box.
-- **Next:** test the names in NX; faster patch search; custom formulas and more surfaces.
+- **Inner cavities, smooth trimmed shapes, faster search (done):** voids (`BREP_WITH_VOIDS`) in every STEP and STL; smooth STEP for the cylinder, sphere and torus; the patch search on one cell first; OpenCASCADE checks in `ctest`.
+- **Heat exchangers and report estimates (done):** channel buffers (separate inlets and outlets per fluid channel, with header plates); mass, stiffness bounds, permeability and pressure drop estimates; CSV reports.
+- **Next:** test the names in NX; custom formulas and more surfaces.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.
+
+## License
+
+MIT: see [LICENSE](LICENSE).

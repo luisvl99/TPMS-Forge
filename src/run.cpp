@@ -52,6 +52,16 @@ Shape (default box)
   --buffers x|y|z L [L1] box, void: empty buffer zones L mm long before and
                         after the lattice along the axis, fused with the
                         fluid: inlet and outlet regions for CFD.
+  --channel-buffers A B L [T]
+                        box, sheet: separate inlets and outlets for the two
+                        fluid channels (heat exchanger, cross flow). Channel
+                        A (f > c) flows along axis A, channel B (f < -c)
+                        along axis B (x, y or z). Each gets buffers L mm long
+                        on its two faces, behind header plates T mm thick
+                        (default 1) with holes where it opens: the plates
+                        close the other channel there. --part void writes
+                        each channel's fluid to its own file; --part solid
+                        writes the lattice with the plates.
   --cell-grade x|y|z L1 box: the cell length along that axis changes
                         linearly from --cell (start) to L1 mm (end).
   --cells N [Ny Nz]     Cell counts (default 2).
@@ -66,7 +76,7 @@ Shape (default box)
                         keeps cells square; linear keeps them equally thick).
   Round shapes are centered at the origin with their axis along z.
 
-STEP (smooth B-spline faces; box, tube and torus-shell)
+STEP (smooth B-spline faces; every shape)
   --patches N           Patch grid steps per unit cell edge to start from
                         (default 3). The tool steps it up until the geometry
                         is valid and within --tol.
@@ -76,7 +86,6 @@ STEP (smooth B-spline faces; box, tube and torus-shell)
                         Default: merge patches into large trimmed faces whose
                         edges lie within --tol of the faces.
   --faceted             Write one planar face per triangle instead (v0).
-                        Works for every shape.
 
 STL and faceted STEP
   --res N               Grid steps per unit cell edge (default 24).
@@ -87,11 +96,18 @@ Both
                         (default 0.01). Use 0 to keep all pieces.
 
 Output
-  -o, --out FILE        .step / .stp, .stl (binary), or .json (the property
-                        report). Repeat for several files.
+  -o, --out FILE        .step / .stp, .stl (binary), or .json / .csv (the
+                        property report). Repeat for several files.
   --report              Print the property report: solid and fluid volumes,
                         wetted area, hydraulic diameters, wall thickness,
-                        and which faces of the shape each piece touches.
+                        permeability, stiffness bounds, and which faces of
+                        the shape each piece touches.
+  --material RHO [E]    Report: solid density in kg/m^3 (mass), and Young's
+                        modulus in GPa (stiffness estimates in GPa).
+  --flow U [MU RHO]     Report: superficial (inlet) velocity in m/s, fluid
+                        viscosity in Pa s and density in kg/m^3 (default
+                        water: 0.001, 998). Adds Reynolds numbers and
+                        pressure drop estimates per fluid channel.
   --list                List surface types.
   -h, --help            Show this help.
 
@@ -119,10 +135,12 @@ bool number(const std::string& s, double& out) {
     return end != s.c_str() && *end == '\0' && std::isfinite(out);
 }
 
-// Reads up to `max` numbers after the flag at args[i]. Returns how many.
+// Reads up to `max` numbers after the flag at args[i]. Returns how many;
+// the rest of `out` keeps its values (defaults).
 int numbers(const std::vector<std::string>& args, size_t& i, double* out, int max) {
     int n = 0;
-    while (n < max && i + 1 < args.size() && number(args[i + 1], out[n])) ++i, ++n;
+    double v;
+    while (n < max && i + 1 < args.size() && number(args[i + 1], v)) out[n++] = v, ++i;
     return n;
 }
 
@@ -186,6 +204,28 @@ std::string triangleName(const Options& o, const Lattice& lat, const Grid& g, Ve
         auto onPlane = [&](int k, double at) {
             return std::fabs(a[k] - at) < 0.05 * h && std::fabs(b[k] - at) < 0.05 * h && std::fabs(c[k] - at) < 0.05 * h;
         };
+        // Channel buffers of channel K on face F: on F the plate covers the
+        // other channel (its wall; slivers of walls that touch F go by the
+        // field, as walls do); beyond F, the plate's outer face and the
+        // holes through it are K's walls, the buffer's end is the port (F's
+        // name), and its sides are named after the faces they lie on.
+        const Grid box = gridOf(o, 1);
+        for (int F = 0; F < 6; ++F) {
+            const int K = s.headerChannel(F), ax = F / 2;
+            if (K < 0) continue;
+            bool over = true;  // the centroid lies over the face's rectangle
+            for (int k = 0; k < 3; ++k) over &= k == ax || (m[k] > -0.05 * h && m[k] < box.size[k] + 0.05 * h);
+            const double face = F % 2 ? box.size[ax] : 0, out = F % 2 ? 1 : -1;
+            if (!over) continue;
+            if (onPlane(ax, face)) return lat.value(m.x, m.y, m.z) > 0 ? "wall A" : "wall B";
+            if ((m[ax] - face) * out <= 0) continue;  // inside the box
+            if (onPlane(ax, face + out * s.header)) return K ? "wall B" : "wall A";
+            if (onPlane(ax, face + out * (s.header + s.buffer))) return s.faceName(F);
+            for (int k = 0; k < 3; ++k)
+                for (int side = 0; side < 2 && k != ax; ++side)
+                    if (onPlane(k, side * box.size[k])) return s.faceName(2 * k + side);
+            return K ? "wall B" : "wall A";
+        }
         if (sa >= 0) {
             const double hi = gridOf(o, 1).size[sa];
             if (onPlane(sa, -s.slab[0])) return s.faceName(2 * sa);
@@ -258,6 +298,22 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
             if (n == 0) return error = a + " needs 1 or 2 thicknesses", false;
             if (n == 1) o.shape.slab[1] = o.shape.slab[0];
             (a == "--plates" ? o.plates : o.buffers) = true;
+        } else if (a == "--channel-buffers" && i + 2 < args.size()) {
+            int* axis = o.shape.channelAxis;
+            axis[0] = axisOf(lower(args[i + 1])), axis[1] = axisOf(lower(args[i + 2]));
+            if (axis[0] < 0 || axis[1] < 0 || axis[0] == axis[1])
+                return error = "--channel-buffers needs two different axes (x, y or z): channel A's, then B's", false;
+            i += 2;
+            n = numbers(args, i, r, 2);
+            if (n == 0) return error = "--channel-buffers needs a buffer length (and a plate thickness)", false;
+            o.shape.buffer = r[0], o.shape.header = n == 2 ? r[1] : 1;
+        } else if (a == "--material") {
+            if (numbers(args, i, o.material, 2) == 0 || !(o.material[0] > 0) || o.material[1] < 0)
+                return error = "--material needs a density > 0 in kg/m^3 (and a Young's modulus in GPa)", false;
+        } else if (a == "--flow") {
+            if (numbers(args, i, o.flow, 3) == 0 || !(o.flow[0] > 0 && o.flow[1] > 0 && o.flow[2] > 0))
+                return error = "--flow needs a velocity in m/s (and a viscosity in Pa s and a density in kg/m^3), all > 0",
+                       false;
         } else if (a == "--unit-cell") {
             o.unitCell = true;
         } else if (a == "--shift") {
@@ -337,6 +393,13 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
         if (s.slab[0] < 0 || s.slab[1] < 0 || s.slab[0] + s.slab[1] <= 0)
             return error = opt + " needs thicknesses >= 0, not both 0", false;
     }
+    if (s.channelAxis[0] >= 0) {
+        if (s.kind != ShapeKind::Box || s.cellGrade >= 0 || o.unitCell || o.plates || o.buffers)
+            return error = "--channel-buffers works for the box (without --cell-grade, --unit-cell, --plates or --buffers)",
+                   false;
+        if (o.form != Form::Sheet) return error = "--channel-buffers needs --form sheet (two fluid channels)", false;
+        if (!(s.buffer > 0 && s.header > 0)) return error = "--channel-buffers needs a length and a thickness > 0", false;
+    }
     if (o.unitCell) {
         if (s.kind != ShapeKind::Box) return error = "--unit-cell works for the box only", false;
         if (o.graded || s.cellGrade >= 0) return error = "--unit-cell needs a lattice without grading", false;
@@ -373,11 +436,8 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
     if (o.tol == 0) o.tol = autoTol(o);
     for (const auto& out : o.outputs) {
         const std::string e = ext(out);
-        if (e != ".step" && e != ".stp" && e != ".stl" && e != ".json")
-            return error = "output '" + out + "' must end in .step, .stp, .stl or .json", false;
-        if ((e == ".step" || e == ".stp") && !o.faceted && s.trimmed())
-            return error = std::string("smooth STEP does not support --shape ") + shapeName(s.kind) +
-                           " yet: write .stl or add --faceted", false;
+        if (e != ".step" && e != ".stp" && e != ".stl" && e != ".json" && e != ".csv")
+            return error = "output '" + out + "' must end in .step, .stp, .stl, .json or .csv", false;
     }
     return true;
 }
@@ -425,25 +485,111 @@ Grid gridOf(const Options& o, int res) {
             g.size[a] = s.mapped() ? o.cells[a] : o.cells[a] * o.cell[a];
         }
     }
-    g.periodic = s.periodic();
+    g.periodic = s.trimmed() ? 0 : s.periodic();  // a trimmed shape's mesh grid is a plain box in mm
     return g;
 }
 
 Grid meshGrid(const Options& o, int res) {
     Grid g = gridOf(o, res);
-    const int a = o.shape.slabAxis;
-    if (a < 0) return g;
-    const double h = g.size[a] / g.steps[a];
-    const int n0 = int(std::ceil(o.shape.slab[0] / h - 1e-9)), n1 = int(std::ceil(o.shape.slab[1] / h - 1e-9));
-    g.origin[a] -= n0 * h, g.steps[a] += n0 + n1, g.size[a] = g.steps[a] * h;
+    const Shape& s = o.shape;
+    // Whole steps added before (F even) or after face F along its axis.
+    auto extend = [&](int F, double length) {
+        const int a = F / 2;
+        const double h = g.size[a] / g.steps[a];
+        const int n = int(std::ceil(length / h - 1e-9));
+        if (F % 2 == 0) g.origin[a] -= n * h;
+        g.steps[a] += n, g.size[a] = g.steps[a] * h;
+    };
+    if (s.slabAxis >= 0) extend(2 * s.slabAxis, s.slab[0]), extend(2 * s.slabAxis + 1, s.slab[1]);
+    for (int F = 0; F < 6; ++F)
+        if (s.headerChannel(F) >= 0) extend(F, s.header + (o.part == Part::Void ? s.buffer : 0));
     return g;
 }
 
-double slabVolume(const Options& o) {
-    const int a = o.shape.slabAxis;
-    if (a < 0) return 0;
-    return (o.shape.slab[0] + o.shape.slab[1]) * o.shape.volume() / o.shape.boxPos(a, o.cells[a]);
+double slabVolume(const Options& o, const Lattice& lat) {
+    const Shape& s = o.shape;
+    double v = 0;
+    if (s.slabAxis >= 0) v += (s.slab[0] + s.slab[1]) * s.volume() / s.boxPos(s.slabAxis, o.cells[s.slabAxis]);
+    const Grid box = gridOf(o, 1);
+    for (int F = 0; F < 6; ++F) {
+        const int K = s.headerChannel(F), a = F / 2, u = (a + 1) % 3, w = (a + 2) % 3;
+        if (K < 0) continue;
+        // Where channel K opens on the face (the holes through its plate):
+        // quasi-random R2 points, as sampledFraction does in 3D.
+        const double g = 1.32471795724474602596, step[2] = {1 / g, 1 / (g * g)};
+        const int samples = 1 << 14;
+        int open = 0;
+        for (int k = 0; k < samples; ++k) {
+            Vec3 p;
+            p[a] = F % 2 ? box.size[a] : 0;
+            p[u] = std::fmod(0.5 + k * step[0], 1.0) * box.size[u], p[w] = std::fmod(0.5 + k * step[1], 1.0) * box.size[w];
+            const double f = lat.value(p.x, p.y, p.z), c = lat.levelAt(p.x, p.y, p.z);
+            open += K ? f < -c : f > c;
+        }
+        const double area = box.size[u] * box.size[w], holes = area * open / samples;
+        v += o.part == Part::Solid ? s.header * (area - holes) : s.header * holes + s.buffer * area;
+    }
+    return v;
 }
+
+namespace {
+
+// Field of a box with channel buffers (negative inside): `channel` -1 for
+// the whole part, or one fluid channel (0: A, 1: B) of a void part. Beyond
+// each face across a channel's axis lies a header plate, solid except where
+// that channel opens on the face (the face's pattern, extruded), and for
+// the void part the buffer beyond it. On the face itself the lattice takes
+// the plate's cover, so the plate's face over the other channel lies
+// exactly there. kSteep turns mm into field units: large, so that change
+// is limited to the face. Lateral bounds are needed only along the other
+// channel's axis: elsewhere the grid ends at the box.
+double headerField(const Options& o, const Lattice& lat, const double L[3], Vec3 p, int channel) {
+    const Shape& s = o.shape;
+    const bool solid = o.part == Part::Solid;
+    constexpr double kSteep = 1e4;
+    auto plate = [&](int K, Vec3 q) {  // < 0 where channel K's plate is solid at a point q of its face
+        const double f = lat.value(q.x, q.y, q.z), c = lat.levelAt(q.x, q.y, q.z);
+        return K ? -f - c : f - c;
+    };
+    int out = -1, outside = 0;
+    double beyond = 0;
+    for (int a = 0; a < 3; ++a) {
+        const double d = std::max(-p[a], p[a] - L[a]);
+        if (d > 0) out = a, ++outside;
+        beyond = std::max(beyond, d);
+    }
+    if (outside == 0) {
+        double g;
+        if (channel < 0) {
+            g = lat(p.x, p.y, p.z);
+        } else {
+            const double f = lat.value(p.x, p.y, p.z), c = lat.levelAt(p.x, p.y, p.z);
+            g = channel ? f + c : c - f;
+        }
+        for (int F = 0; F < 6; ++F) {
+            const int K = s.headerChannel(F), a = F / 2;
+            if (K < 0) continue;
+            Vec3 q = p;
+            q[a] = F % 2 ? L[a] : 0;
+            const double depth = std::fabs(p[a] - q[a]);
+            g = solid ? std::min(g, std::max(plate(K, q), kSteep * depth))
+                      : std::max(g, std::min(-plate(K, q), -kSteep * depth));
+        }
+        return g;
+    }
+    const int a = out, F = 2 * a + int(p[a] > L[a]), K = outside == 1 ? s.headerChannel(F) : -1;
+    if (K < 0 || (channel >= 0 && K != channel)) return beyond;
+    Vec3 q = p;
+    q[a] = F % 2 ? L[a] : 0;
+    const double t = std::fabs(p[a] - q[a]);  // beyond the face, mm
+    double g = solid ? std::max(plate(K, q), t - s.header)
+                     : std::max(std::min(-plate(K, q), kSteep * (s.header - t)), t - s.header - s.buffer);
+    for (int b = 0; b < 3; ++b)
+        if (b != a && s.headerChannel(2 * b) >= 0) g = std::max(g, std::max(-p[b], p[b] - L[b]));
+    return g;
+}
+
+}  // namespace
 
 Mesh meshSolid(const Options& o, const Lattice& lat, int res, size_t* droppedDegenerate) {
     // Plates or buffers: the lattice in its box, joined with a slab on each
@@ -453,8 +599,11 @@ Mesh meshSolid(const Options& o, const Lattice& lat, int res, size_t* droppedDeg
     // where it meets a slab, which a min of two box fields would not do.
     const Shape& s = o.shape;
     const int a = s.slabAxis;
-    const double hi = a < 0 ? 0 : gridOf(o, 1).size[a], none = 1e300;
+    const bool headers = s.channelAxis[0] >= 0;
+    const Grid box = gridOf(o, 1);
+    const double hi = a < 0 ? 0 : box.size[a], none = 1e300;
     const Field field = [&](double x, double y, double z) {
+        if (headers) return headerField(o, lat, box.size, {x, y, z}, -1);
         const double g = lat(x, y, z);
         if (a < 0) return g;
         const double p = a == 0 ? x : a == 1 ? y : z;
@@ -462,7 +611,29 @@ Mesh meshSolid(const Options& o, const Lattice& lat, int res, size_t* droppedDeg
         const double inBox = std::min(s.slab[0] > 0 ? p : none, s.slab[1] > 0 ? hi - p : none);
         return std::max(ends, std::min(g, inBox));
     };
-    Mesh m = meshField(field, meshGrid(o, res), droppedDegenerate);
+    Mesh m;
+    if (o.part == Part::Void && lat.form == Form::Sheet && a < 0) {
+        // A sheet's fluid: each channel (f > c, f < -c) meshed alone. In one
+        // mesh of |f| > c, a sheet thinner than the grid leaks between two
+        // nodes and joins them. (Buffers join them anyway.)
+        size_t dropped[2] = {0, 0};
+        for (int c = 0; c < 2; ++c) {
+            const double sign = c ? 1 : -1;
+            const Mesh part = meshField(
+                [&](double x, double y, double z) {
+                    if (headers) return headerField(o, lat, box.size, {x, y, z}, c);
+                    const double g = sign * lat.value(x, y, z) + lat.levelAt(x, y, z);
+                    return s.trimmed() ? std::max(g, s.inside(x, y, z)) : g;
+                },
+                meshGrid(o, res), &dropped[c]);
+            const auto base = uint32_t(m.vertices.size());
+            m.vertices.insert(m.vertices.end(), part.vertices.begin(), part.vertices.end());
+            for (auto t : part.triangles) m.triangles.push_back({t[0] + base, t[1] + base, t[2] + base});
+        }
+        if (droppedDegenerate) *droppedDegenerate = dropped[0] + dropped[1];
+    } else {
+        m = meshField(field, meshGrid(o, res), droppedDegenerate);
+    }
     if (o.shape.mapped())
         for (Vec3& v : m.vertices) v = o.shape.map(v);
     return m;
@@ -502,15 +673,49 @@ Pieces keepPieces(const Mesh& mesh, double minFragment) {
         vols.push_back(volume(p));
         maxVol = std::max(maxVol, vols.back());
     }
+    std::vector<int> keptAs(pieces.size(), -1);
     for (size_t i = 0; i < pieces.size(); ++i) {
-        if (vols[i] <= 0) ++out.cavities;
-        else if (vols[i] < minFragment * maxVol) ++out.fragments;
-        else {
-            out.volume += vols[i];
-            out.triangles += pieces[i].triangles.size();
-            out.kept.push_back(std::move(pieces[i]));
-        }
+        if (vols[i] <= 0) continue;
+        if (vols[i] < minFragment * maxVol) ++out.fragments;
+        else keptAs[i] = int(out.kept.size()), out.kept.push_back(pieces[i]);
     }
+    // An inner cavity joins the smallest piece around it (ray parity from a
+    // point on it). The cavity of a dropped fragment goes with it; a tiny
+    // cavity is a fragment too, and is filled.
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        if (vols[i] > 0) continue;
+        if (-vols[i] < minFragment * maxVol) {
+            ++out.fragments;
+            continue;
+        }
+        int host = -1, outer = 0;
+        for (size_t j = 0; j < pieces.size(); ++j)
+            if (vols[j] > 0) host = int(j), ++outer;
+        if (outer > 1) host = -1;
+        // Several pieces: a ray from a few of its triangles (one along a grid
+        // line can graze edges and miscount).
+        for (size_t k = 0; k < pieces[i].triangles.size() && k < 5 && host < 0; ++k) {
+            const auto& t = pieces[i].triangles[k * pieces[i].triangles.size() / 5];
+            const Vec3 q = (pieces[i].vertices[t[0]] + pieces[i].vertices[t[1]] + pieces[i].vertices[t[2]]) * (1.0 / 3);
+            for (size_t j = 0; j < pieces.size(); ++j) {
+                if (vols[j] <= 0 || (host >= 0 && vols[j] >= vols[size_t(host)])) continue;
+                int hits = 0;
+                for (const auto& u : pieces[j].triangles)
+                    hits += rayHits(pieces[j].vertices[u[0]], pieces[j].vertices[u[1]], pieces[j].vertices[u[2]], q);
+                if (hits % 2) host = int(j);
+            }
+        }
+        if (host < 0) {
+            ++out.cavities;
+            continue;
+        }
+        if (keptAs[size_t(host)] < 0) continue;
+        Mesh& m = out.kept[size_t(keptAs[size_t(host)])];
+        const auto base = uint32_t(m.vertices.size());
+        m.vertices.insert(m.vertices.end(), pieces[i].vertices.begin(), pieces[i].vertices.end());
+        for (auto tri : pieces[i].triangles) m.triangles.push_back({tri[0] + base, tri[1] + base, tri[2] + base});
+    }
+    for (size_t i = 0; i < out.kept.size(); ++i) out.volume += volume(out.kept[i]), out.triangles += out.kept[i].triangles.size();
     return out;
 }
 
@@ -534,15 +739,16 @@ int run(const std::vector<std::string>& args, const Print& print) {
     if (!parseArgs(args, o, error)) return print("error: " + error), 2;
     if (o.outputs.empty() && !o.report) return print("error: no output file. Add -o lattice.step (or --report)"), 2;
     bool needMesh = false, needReport = o.report;
+    auto isReport = [](const std::string& out) { return ext(out) == ".json" || ext(out) == ".csv"; };
     for (const auto& out : o.outputs) {
-        needMesh |= ext(out) == ".stl" || (o.faceted && ext(out) != ".json");
-        needReport |= ext(out) == ".json";
+        needMesh |= ext(out) == ".stl" || (o.faceted && !isReport(out));
+        needReport |= isReport(out);
     }
 
     const Lattice lat = makeLattice(o);
     const int* cells = o.cells;
     const Shape& s = o.shape;
-    const double shapeVol = shapeVolume(o), slabVol = slabVolume(o);
+    const double shapeVol = shapeVolume(o), slabVol = slabVolume(o, lat);
     auto solidFraction = [&](double exported) { return o.part == Part::Solid ? exported : 1.0 - exported; };
     // Solid fraction of a volume of the exported part: in the lattice box,
     // without plates or buffers.
@@ -558,9 +764,9 @@ int run(const std::vector<std::string>& args, const Print& print) {
     };
     auto dropped = [&](size_t fragments, size_t cavities) {
         if (fragments)
-            say(print, "note: dropped %zu small fragment(s) cut off by the shape (< %g x largest).", fragments,
+            say(print, "note: dropped %zu small fragment(s) or filled tiny cavities (< %g x largest).", fragments,
                 o.minFragment);
-        if (cavities) say(print, "warning: dropped %zu inner cavity shell(s). Not supported yet.", cavities);
+        if (cavities) say(print, "warning: dropped %zu inner cavity shell(s) found inside no solid.", cavities);
     };
     auto wrote = [&](const std::string& path) {
         std::error_code ec;
@@ -589,6 +795,10 @@ int run(const std::vector<std::string>& args, const Print& print) {
             say(print, "%s   : %g mm at %s, %g mm at %s (%.6g mm^3, not in the fractions)",
                 o.plates ? "Plates " : "Buffers", s.slab[0], s.faceName(2 * s.slabAxis), s.slab[1],
                 s.faceName(2 * s.slabAxis + 1), slabVol);
+        if (s.channelAxis[0] >= 0)
+            say(print, "Channels  : A along %c, B along %c; buffers %g mm behind header plates %g mm thick "
+                       "(%.6g mm^3, not in the fractions)",
+                kAxes[s.channelAxis[0]], kAxes[s.channelAxis[1]], s.buffer, s.header, slabVol);
         if (s.cellGrade >= 0)
             say(print, "Cell size : along %c from %g to %g mm (graded)", kAxes[s.cellGrade], o.cell[s.cellGrade],
                 s.cellEnd);
@@ -645,9 +855,16 @@ int run(const std::vector<std::string>& args, const Print& print) {
         if (mesh.triangles > 300000) say(print, "note: %zu triangles is heavy for CAD. Lower --res.", mesh.triangles);
     }
 
+    // A sheet's fluid is two channels: each goes to a STEP file of its own.
+    const bool splitChannels = o.part == Part::Void && o.form == Form::Sheet;
+    auto channelNote = [](bool both) {
+        return std::string(both ? "a fluid solid lies in both channels (they meet in a buffer, or the sheet has holes "
+                                  "at this --res), so they stay in one file"
+                                : "only one fluid channel is left, so it is one file");
+    };
     for (const auto& out : o.outputs) {
         const std::filesystem::path p(out);
-        if (ext(out) == ".json") continue;  // the report, below
+        if (isReport(out)) continue;  // the report, below
         if (ext(out) == ".stl" || o.faceted) {
             // Faceted STEP: solids named by part and fluid channel, faces as
             // walls or by the face of the shape they lie on.
@@ -671,25 +888,48 @@ int run(const std::vector<std::string>& args, const Print& print) {
                 const int count = ++seen[base];
                 solidNames.push_back(count == 1 ? base : base + " " + std::to_string(count));
             }
-            const bool written = ext(out) == ".stl"
-                                     ? writeStl(out, mesh.kept)
-                                     : writeStep(out, mesh.kept, p.stem().string(), solidNames, name);
-            if (!written) {
-                say(print, "error: cannot write '%s'", out.c_str());
-                ok = false;
+            if (ext(out) == ".stl") {
+                if (writeStl(out, mesh.kept)) wrote(out);
+                else say(print, "error: cannot write '%s'", out.c_str()), ok = false;
                 continue;
             }
-            wrote(out);
+            // A sheet's fluid: channel A and channel B in a file each.
+            std::vector<std::vector<size_t>> groups(1);
+            std::vector<std::string> suffixes{""};
+            for (size_t k = 0; k < mesh.kept.size(); ++k) groups[0].push_back(k);
+            if (splitChannels) {
+                std::vector<size_t> channel[2];
+                bool both = false;
+                for (size_t k = 0; k < solidNames.size(); ++k) {
+                    if (solidNames[k].rfind("fluid A", 0) == 0) channel[0].push_back(k);
+                    else if (solidNames[k].rfind("fluid B", 0) == 0) channel[1].push_back(k);
+                    else both = true;
+                }
+                if (both || channel[0].empty() || channel[1].empty()) say(print, "note: %s", channelNote(both).c_str());
+                else groups = {channel[0], channel[1]}, suffixes = {"_A", "_B"};
+            }
+            for (size_t g = 0; g < groups.size(); ++g) {
+                const std::string file = withSuffix(out, suffixes[g]);
+                std::vector<Mesh> parts;
+                std::vector<std::string> names;
+                for (size_t k : groups[g]) parts.push_back(mesh.kept[k]), names.push_back(solidNames[k]);
+                const auto& ks = groups[g];
+                if (writeStep(file, parts, p.stem().string() + suffixes[g], names,
+                              [&](size_t i, size_t t) { return name(ks[i], t); }))
+                    wrote(file);
+                else say(print, "error: cannot write '%s'", file.c_str()), ok = false;
+            }
             continue;
         }
         const SmoothReport r =
             writeSmoothStep(out, p.stem().string(), lat, cells, o.patches, o.tol, o.minFragment, o.exact,
-                            expected * shapeVol + slabVol, shapeVol + slabVol);
+                            expected * shapeVol + slabVol, shapeVol + slabVol, splitChannels);
         if (!r.error.empty()) {
             if (r.error == "nothing to export") say(print, "error: nothing to export. Check --density / --level.");
             else if (r.error.rfind("cannot write", 0) == 0) say(print, "error: %s", r.error.c_str());
-            else say(print, "error: %s: %s at %d patches per cell. Try a higher --patches.", out.c_str(),
-                     r.error.c_str(), r.patches);
+            else say(print, "error: %s: %s at %d patches per cell. Try a higher --patches%s.", out.c_str(),
+                     r.error.c_str(), r.patches,
+                     s.trimmed() ? ", or --shift 0.1 (walls through the axis or center are hard to fit)" : "");
             ok = false;
             continue;
         }
@@ -701,14 +941,15 @@ int run(const std::vector<std::string>& args, const Print& print) {
             r.samples);
         dropped(r.fragments, r.cavities);
         checkFraction(r.volume, "Raise --patches.");
-        wrote(out);
+        if (!r.note.empty()) say(print, "note: %s.", r.note.c_str());
+        for (const auto& file : r.files) wrote(file);
     }
     if (needReport) {
         const Report rep = makeReport(o, lat, o.res);
         if (o.report) printReport(rep, o, print);
         for (const auto& out : o.outputs) {
-            if (ext(out) != ".json") continue;
-            if (writeReportJson(out, rep, o, lat)) wrote(out);
+            if (!isReport(out)) continue;
+            if (ext(out) == ".json" ? writeReportJson(out, rep, o, lat) : writeReportCsv(out, rep, o, lat)) wrote(out);
             else say(print, "error: cannot write '%s'", out.c_str()), ok = false;
         }
     }

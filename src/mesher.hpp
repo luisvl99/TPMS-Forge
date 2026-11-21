@@ -44,4 +44,14 @@ std::vector<Mesh> splitComponents(const Mesh& m);
 // Enclosed volume (positive for an outward-oriented closed mesh).
 double volume(const Mesh& m);
 
+// Whether the ray from q along +x passes through triangle abc. The parity of
+// the hits on a closed surface tells whether q lies inside it.
+inline bool rayHits(Vec3 a, Vec3 b, Vec3 c, Vec3 q) {
+    const Vec3 ab = b - a, ac = c - a, aq = q - a;
+    const double d = ab.y * ac.z - ac.y * ab.z;
+    if (d == 0) return false;
+    const double u = (aq.y * ac.z - ac.y * aq.z) / d, v = (ab.y * aq.z - aq.y * ab.z) / d;
+    return u >= 0 && v >= 0 && u + v <= 1 && a.x + ab.x * u + ac.x * v > q.x;
+}
+
 }  // namespace tpms

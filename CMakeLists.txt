@@ -74,23 +74,87 @@ endforeach()
 # Smoke test: the tool exits non-zero when its own geometry checks fail
 # (closed shell, fit error, volume against the field).
 enable_testing()
+
+# STEP tests are also read back by OpenCASCADE (tools/check_step.py: valid
+# closed solids) when a Python with cadquery-ocp is found: the project's
+# .venv, or set TPMS_PYTHON.
+if(NOT TPMS_PYTHON)
+  foreach(p ${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe ${CMAKE_SOURCE_DIR}/.venv/bin/python)
+    if(EXISTS ${p})
+      set(TPMS_PYTHON ${p})
+    endif()
+  endforeach()
+endif()
+set(occ OFF)
+if(TPMS_PYTHON)
+  execute_process(COMMAND ${TPMS_PYTHON} -c "import OCP" RESULT_VARIABLE no_occ OUTPUT_QUIET ERROR_QUIET)
+  if(NOT no_occ)
+    set(occ ON)
+  endif()
+endif()
+message(STATUS "OpenCASCADE checks: ${occ} (${TPMS_PYTHON})")
+
+# A tpms run writing test-NAME.step, then the OpenCASCADE check of it.
+function(step_test name)
+  set(out ${CMAKE_BINARY_DIR}/test-${name}.step)
+  add_test(NAME ${name} COMMAND tpms ${ARGN} -o ${out})
+  if(occ)
+    set(check ${CMAKE_SOURCE_DIR}/tools/check_step.py)
+    if(name STREQUAL "unit-cell")
+      list(APPEND check --periodic)
+    endif()
+    set_tests_properties(${name} PROPERTIES FIXTURES_SETUP ${name})
+    add_test(NAME occ-${name} COMMAND ${TPMS_PYTHON} ${check} ${out})
+    set_tests_properties(occ-${name} PROPERTIES FIXTURES_REQUIRED ${name})
+  endif()
+endfunction()
+
 foreach(t gyroid schwarz-p diamond iwp frd fischer-koch-s neovius)
-  add_test(NAME smooth-${t} COMMAND tpms --type ${t} --cells 1 -o ${CMAKE_BINARY_DIR}/test-${t}.step)
+  step_test(${t} --type ${t} --cells 1)
 endforeach()
 # Smooth STEP of the curved shapes: seams welded, curved caps, merged faces.
-add_test(NAME smooth-tube COMMAND tpms --shape tube --radius 10 20 --height 10 --cells 1 6 1 -o ${CMAKE_BINARY_DIR}/test-tube.step)
-add_test(NAME smooth-torus-shell COMMAND tpms --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4 -o ${CMAKE_BINARY_DIR}/test-torus-shell.step)
-# Graded density and cell size (a mapped box), and the property report.
-add_test(NAME smooth-graded COMMAND tpms --cell 5 --cells 3 2 2 --cell-grade x 10 --density 0.3 0.15 --grade x -o ${CMAKE_BINARY_DIR}/test-graded.step)
+step_test(tube --shape tube --radius 10 20 --height 10 --cells 1 6 1)
+step_test(torus-shell --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4)
+# Graded density and cell size (a mapped box).
+step_test(graded --cell 5 --cells 3 2 2 --cell-grade x 10 --density 0.3 0.15 --grade x)
 # Unit cell: exit 1 if opposite faces do not match.
-add_test(NAME unit-cell COMMAND tpms --unit-cell --type diamond --cell 8 10 12 --shift 0.25 0 0.1 -o ${CMAKE_BINARY_DIR}/test-cell.step)
+step_test(unit-cell --unit-cell --type diamond --cell 8 10 12 --shift 0.25 0 0.1)
+# Trimmed shapes: built around the axis, center line or center (poles).
+step_test(cylinder --shape cylinder --radius 10 --height 20)
+step_test(sphere --shape sphere --radius 10)
+step_test(torus --shape torus --radius 5 --major 12)
+# Inner cavities as voids: isolated network blobs in the fluid.
+step_test(voids --type neovius --form network --density 0.3 --part void)
+# A sheet's fluid: one file per channel, test-fluid_A.step and test-fluid_B.step.
+add_test(NAME fluid-split COMMAND tpms --part void -o ${CMAKE_BINARY_DIR}/test-fluid.step)
+if(occ)
+  set_tests_properties(fluid-split PROPERTIES FIXTURES_SETUP fluid-split)
+  add_test(NAME occ-fluid-split COMMAND ${TPMS_PYTHON} ${CMAKE_SOURCE_DIR}/tools/check_step.py
+           ${CMAKE_BINARY_DIR}/test-fluid_A.step ${CMAKE_BINARY_DIR}/test-fluid_B.step)
+  set_tests_properties(occ-fluid-split PROPERTIES FIXTURES_REQUIRED fluid-split)
+endif()
 # Plates and buffers: exit 1 if the volume (with the slabs) does not match.
-add_test(NAME smooth-plates COMMAND tpms --plates z 1 2 -o ${CMAKE_BINARY_DIR}/test-plates.step)
-add_test(NAME smooth-buffers COMMAND tpms --part void --buffers x 5 -o ${CMAKE_BINARY_DIR}/test-buffers.step)
+step_test(plates --plates z 1 2)
+step_test(buffers --part void --buffers x 5)
+# Channel buffers (heat exchanger): the solid with its header plates, and each
+# channel's fluid in a file of its own, test-channels_A.step and _B.step.
+step_test(channel-plates --channel-buffers x y 5 1)
+add_test(NAME channel-fluids COMMAND tpms --part void --channel-buffers z x 4 0.5 -o ${CMAKE_BINARY_DIR}/test-channels.step)
+if(occ)
+  set_tests_properties(channel-fluids PROPERTIES FIXTURES_SETUP channel-fluids)
+  add_test(NAME occ-channel-fluids COMMAND ${TPMS_PYTHON} ${CMAKE_SOURCE_DIR}/tools/check_step.py
+           ${CMAKE_BINARY_DIR}/test-channels_A.step ${CMAKE_BINARY_DIR}/test-channels_B.step)
+  set_tests_properties(occ-channel-fluids PROPERTIES FIXTURES_REQUIRED channel-fluids)
+endif()
+add_test(NAME channel-fluids-stl COMMAND tpms --part void --channel-buffers x y 5 1 --res 12 -o ${CMAKE_BINARY_DIR}/test-channels.stl)
+# The report with its inputs, as CSV.
+add_test(NAME report-csv COMMAND tpms --material 4430 114 --flow 0.1 -o ${CMAKE_BINARY_DIR}/test-report.csv)
 add_test(NAME report COMMAND tpms --shape tube --radius 10 20 --height 10 --cells 1 6 1 --report -o ${CMAKE_BINARY_DIR}/test-report.json)
 # Conflicting options must be refused (exit 2), not silently resolved.
 add_test(NAME usage-density-and-level COMMAND tpms --density 0.3 --level 0.5 -o ${CMAKE_BINARY_DIR}/test-usage.stl)
 set_tests_properties(usage-density-and-level PROPERTIES WILL_FAIL TRUE)
+add_test(NAME usage-channel-buffers-network COMMAND tpms --form network --channel-buffers x y 5 -o ${CMAKE_BINARY_DIR}/test-usage.stl)
+set_tests_properties(usage-channel-buffers-network PROPERTIES WILL_FAIL TRUE)
 # Every shape as a closed STL mesh (exit 1 if not closed, 2 if empty).
 add_test(NAME shape-tube COMMAND tpms --shape tube --radius 10 20 --height 20 --cells 1 8 2 --res 12 -o ${CMAKE_BINARY_DIR}/test-tube.stl)
 add_test(NAME shape-torus-shell COMMAND tpms --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4 --res 10 -o ${CMAKE_BINARY_DIR}/test-torus-shell.stl)

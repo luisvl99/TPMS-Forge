@@ -291,8 +291,9 @@ struct Face {
     int box = -1;                            // box face of a cap
     Vec3 origin, normal;                     // a plane given directly (normal not zero)
     std::string name;                        // when not named by the above
-    std::vector<std::vector<Vec3>> ctrl;     // trimmed B-spline of a merged region
+    std::vector<std::vector<Vec3>> ctrl;     // trimmed B-spline of a merged region, or a ruled hole wall
     std::vector<double> knots[2];            // its knots along u and v
+    int degree[2] = {kDeg, kDeg};            // its degrees (a ruled face: 1 along v)
     std::vector<Loop> loops;                 // first loop is the outer one
     double volume = 0;                       // contribution to the enclosed volume
 };
@@ -300,14 +301,18 @@ struct Face {
 class Builder {
 public:
     Builder(const Lattice& lat, const int cells[3], int res, double tol)
-        : lat_(lat), shape_(lat.shape), mapped_(lat.shape.mapped()), periodic_(lat.shape.periodic()),
-          tol_(tol) {
+        : lat_(lat), shape_(lat.shape), straight_(lat.shape.trimmed()), mapped_(lat.shape.mapped() || straight_),
+          periodic_(lat.shape.periodic()), tol_(tol) {
+        open_ = lat;
+        open_.shape = Shape{};  // the field without trimming
         for (int a = 0; a < 3; ++a) {
+            const double cell = straight_ ? 1.0 : lat.cell[a];  // in the parameter box
             N_[a] = cells[a] * res;
-            H_[a] = lat.cell[a] / res;
-            L_[a] = cells[a] * lat.cell[a];
+            H_[a] = cell / res;
+            L_[a] = cells[a] * cell;
         }
         hmin_ = std::min({H_[0], H_[1], H_[2]});
+        hmm_ = straight_ ? std::min({lat.cell[0], lat.cell[1], lat.cell[2]}) / res : hmin_;
         sx_ = N_[0] + 1;
         sxy_ = int64_t(sx_) * (N_[1] + 1);
         // phi = sign * (f - level) equals the lattice field near each wall:
@@ -377,11 +382,19 @@ public:
                                 poly.push_back(cellVertex(w, sq, mask, i, a));
                                 if (valid[q] && nValid == 1) poly.push_back(cellVertex(w, i, 1 << a, i, a));
                             }
+                            // Orientation from the corners' positions: a
+                            // folded quad then comes out flipped, and the
+                            // closed-shell check sends the search to a finer
+                            // grid. A trimmed shape's parameter box is too
+                            // distorted for that (sound quads twist there):
+                            // the cells around the edge run counter-clockwise
+                            // about +a, so its quad faces +a if the edge
+                            // starts inside.
                             Vec3 out;
                             out[a] = v0 < 0 ? 1.0 : -1.0;
                             const Vec3 nrm = cross(verts_[size_t(poly[2])].p - verts_[size_t(poly[0])].p,
                                                    verts_[size_t(poly[3])].p - verts_[size_t(poly[1])].p);
-                            if (dot(nrm, out) < 0) std::reverse(poly.begin(), poly.end());
+                            if (straight_ ? v0 >= 0 : dot(nrm, out) < 0) std::reverse(poly.begin(), poly.end());
                             Patch p;
                             p.wall = w;
                             for (int k = 0; k < 4; ++k) p.v[size_t(k)] = poly[size_t(k)];
@@ -518,6 +531,71 @@ public:
             faces_ = rest;
             if (!closeCaps(F, de, true, error)) return false;
         }
+        return collapsePoles(error);
+    }
+
+    // Trimmed shapes: the faces of the parameter box that map to a line or a
+    // point (Shape::pole) get no caps. Their vertices that map to one point
+    // become one, and their edges there, of zero length in mm, leave every
+    // loop: a patch next to the axis or a pole becomes a triangle.
+    bool collapsePoles(std::string& error) {
+        int poles = 0;
+        for (int F = 0; F < 6; ++F) poles |= int(shape_.pole(F)) << F;
+        if (!poles) return true;
+        const double eps = 1e-9 * (shape_.r1 + shape_.major + shape_.height);
+        std::vector<std::pair<double, int>> on;  // sorted along a generic direction
+        for (size_t v = 0; v < verts_.size(); ++v)
+            if (verts_[v].faces & poles) on.push_back({dot(mm(verts_[v].p), {1, 1.7, 2.3}), int(v)});
+        std::sort(on.begin(), on.end());
+        std::vector<int> rep(verts_.size());
+        std::iota(rep.begin(), rep.end(), 0);
+        for (size_t i = 0; i < on.size(); ++i)
+            for (size_t j = i + 1; j < on.size() && on[j].first - on[i].first < 5 * eps; ++j)
+                if (rep[size_t(on[j].second)] == on[j].second &&
+                    norm(mm(verts_[size_t(on[i].second)].p) - mm(verts_[size_t(on[j].second)].p)) < eps)
+                    rep[size_t(on[j].second)] = rep[size_t(on[i].second)];
+        for (Edge& E : edges_) E.a = rep[size_t(E.a)], E.b = rep[size_t(E.b)];
+        for (Patch& p : patches_)
+            for (int& v : p.v) v = rep[size_t(v)];
+        degenerate_.assign(edges_.size(), 0);
+        for (size_t e = 0; e < edges_.size(); ++e) {
+            const Edge& E = edges_[e];
+            if (E.a != E.b) continue;
+            bool point = true;
+            for (const Vec3& q : E.mm) point = point && norm(q - E.mm[0]) < eps;
+            degenerate_[e] = point;
+        }
+        for (size_t f = 0; f < faces_.size(); ++f) {
+            auto& loops = faces_[f].loops;
+            for (Loop& l : loops)
+                l.erase(std::remove_if(l.begin(), l.end(), [&](const auto& s) { return degenerate_[size_t(s.first)]; }),
+                        l.end());
+            loops.erase(std::remove_if(loops.begin(), loops.end(), [](const Loop& l) { return l.empty(); }), loops.end());
+            if (loops.empty()) return error = "a face collapsed into a pole", false;
+        }
+        // A cap on the sphere around a pole runs up its seam edge to the
+        // pole and straight back down. Readers want the circle alone there
+        // (they add the seam and the pole themselves), so an edge used there
+        // and back in a row goes. A band around the sphere keeps its seam
+        // between its two circles, as the tube's cylinder caps do.
+        if (shape_.kind != ShapeKind::Sphere) return true;
+        for (Face& f : faces_) {
+            if (f.box < 0) continue;
+            for (Loop& l : f.loops) {
+                Loop out;
+                auto cancels = [](const std::pair<int, bool>& x, const std::pair<int, bool>& y) {
+                    return x.first == y.first && x.second != y.second;
+                };
+                for (const auto& step : l)
+                    if (!out.empty() && cancels(out.back(), step)) out.pop_back();
+                    else out.push_back(step);
+                while (out.size() >= 2 && cancels(out.front(), out.back())) out.pop_back(), out.erase(out.begin());
+                l = out;
+            }
+            f.loops.erase(std::remove_if(f.loops.begin(), f.loops.end(), [](const Loop& l) { return l.empty(); }),
+                          f.loops.end());
+            if (f.loops.empty()) return error = "a cap on the sphere has no boundary", false;
+        }
         return true;
     }
 
@@ -545,7 +623,7 @@ public:
             const auto& p = edges_[e].pts;  // closed edges have equal ends: measure the path
             double length = 0;
             for (size_t k = 0; k + 1 < p.size(); ++k) length += norm(p[k + 1] - p[k]);
-            if (length < 1e-6 * hmin_) {
+            if (length < 1e-6 * hmin_ || (e < degenerate_.size() && degenerate_[e])) {
                 tiny_[e] = 1;
                 rep_[size_t(root(edges_[e].a))] = root(edges_[e].b);
             }
@@ -724,7 +802,63 @@ public:
         return true;
     }
 
-    std::vector<long> write(StepFile& st, const std::vector<std::vector<int>>& shells) const {
+    // For each shell from shells(): the positive shell an inner cavity
+    // (negative shell) lies in, the smallest around one of its points; -1
+    // for positive shells, -2 for a cavity inside none. Call before merge():
+    // it uses the patch samples.
+    std::vector<int> hosts(const std::vector<std::pair<std::vector<int>, double>>& shells) const {
+        std::vector<int> host(shells.size(), -1), outer;
+        for (size_t s = 0; s < shells.size(); ++s)
+            if (shells[s].second > 0) outer.push_back(int(s));
+        for (size_t s = 0; s < shells.size(); ++s) {
+            if (shells[s].second > 0) continue;
+            host[s] = -2;
+            if (outer.size() == 1) {
+                host[s] = outer[0];
+                continue;
+            }
+            for (int fi : shells[s].first) {  // a point inside one of its patches
+                if (faces_[size_t(fi)].patch < 0) continue;
+                const auto& g = patches_[size_t(faces_[size_t(fi)].patch)].pts;
+                const Vec3 q = g[g.size() / 2][g.size() / 2 - 1];
+                for (int o : outer)
+                    if ((host[s] < 0 || shells[size_t(o)].second < shells[size_t(host[s])].second) &&
+                        crossings(shells[size_t(o)].first, q) % 2)
+                        host[s] = o;
+                break;
+            }
+        }
+        return host;
+    }
+
+    // The shell (index into shells()) each vertex lies on, -1 for none.
+    std::vector<int> vertexShells(const std::vector<std::pair<std::vector<int>, double>>& shells) const {
+        std::vector<int> of(verts_.size(), -1);
+        for (size_t s = 0; s < shells.size(); ++s)
+            for (int fi : shells[s].first)
+                for (const Loop& l : faces_[size_t(fi)].loops)
+                    for (const auto& [e, same] : l) of[size_t(edges_[size_t(e)].a)] = of[size_t(edges_[size_t(e)].b)] = int(s);
+        return of;
+    }
+
+    // Bit per wall a shell's faces lie on or face: for a sheet's fluid, 1 is
+    // channel A (f > c), 2 channel B (f < -c), 3 both (joined in a buffer).
+    int shellWalls(const std::vector<int>& shell) const {
+        int walls = 0;
+        for (int fi : shell)
+            if (faces_[size_t(fi)].wall >= 0) walls |= 1 << faces_[size_t(fi)].wall;
+        return walls;
+    }
+
+    // A vertex of a shell.
+    int shellVertex(const std::vector<int>& shell) const {
+        return edges_[size_t(faces_[size_t(shell[0])].loops[0][0].first)].a;
+    }
+
+    // Each solid: its outer shell, then its inner cavities (written as voids).
+    std::vector<long> write(StepFile& st, const std::vector<std::vector<std::vector<int>>>& solids) const {
+        std::vector<std::vector<int>> shells;
+        for (const auto& s : solids) shells.push_back(s[0]);
         std::unordered_map<int, long> vertexId, edgeId, surfaceId;
         // Names for CAD and CFD setup: faces by what they are (wall, or the
         // face of the shape they lie on), solids by part and fluid channel.
@@ -738,9 +872,7 @@ public:
         std::vector<std::string> names;
         std::unordered_map<std::string, int> seen;
         for (const auto& shell : shells) {
-            int walls = 0;  // bit per wall the shell touches
-            for (int fi : shell)
-                if (faces_[size_t(fi)].wall >= 0) walls |= 1 << faces_[size_t(fi)].wall;
+            const int walls = shellWalls(shell);
             std::string n = lat_.part == Part::Solid ? "solid"
                             : sheet && walls == 1   ? "fluid A"
                             : sheet && walls == 2   ? "fluid B"
@@ -779,8 +911,9 @@ public:
                     for (const Vec3& c : row) ids.push_back(point(c));
                     rows += (rows.size() > 1 ? ",\n" : "") + refList(ids);
                 }
-                surface = st.add("B_SPLINE_SURFACE_WITH_KNOTS('',3,3," + rows + "),.UNSPECIFIED.,.F.,.F.,.F.," + mu +
-                                 "," + mv + "," + ku + "," + kv + ",.UNSPECIFIED.)");
+                surface = st.add("B_SPLINE_SURFACE_WITH_KNOTS(''," + std::to_string(f.degree[0]) + "," +
+                                 std::to_string(f.degree[1]) + "," + rows + "),.UNSPECIFIED.,.F.,.F.,.F.," + mu + "," +
+                                 mv + "," + ku + "," + kv + ",.UNSPECIFIED.)");
             } else {
                 const int a = f.box / 2, side = f.box % 2;
                 auto placement = [&](Vec3 origin, Vec3 z, Vec3 x) {
@@ -795,8 +928,11 @@ public:
                     surface = st.add("PLANE(''," + placement(mm(f.origin), f.normal, x) + ")");
                 } else if (!flatCap(f.box)) {  // radial cap of a curved shape, around z
                     const std::string ax = placement({}, {0, 0, 1}, {1, 0, 0}), r = real(side ? shape_.r1 : shape_.r0);
-                    surface = shape_.kind == ShapeKind::Tube
+                    const ShapeKind k = shape_.kind;
+                    surface = k == ShapeKind::Tube || k == ShapeKind::Cylinder
                                   ? st.add("CYLINDRICAL_SURFACE(''," + ax + "," + r + ")")
+                              : k == ShapeKind::Sphere
+                                  ? st.add("SPHERICAL_SURFACE(''," + placement({}, shape_.frame[2], shape_.frame[0]) + "," + r + ")")
                                   : st.add("TOROIDAL_SURFACE(''," + ax + "," + real(shape_.major) + "," + r + ")");
                 } else {  // plane through a corner of the face, normal out of the solid
                     Vec3 corner, nrm, x;  // flat caps lie across a parameter axis that maps to the same mm axis
@@ -835,8 +971,10 @@ public:
             return st.add("EDGE_LOOP(''," + refList(oes) + ")");
         };
 
-        std::vector<long> solids;
-        for (const auto& shell : shells) {
+        // A closed shell. A cavity's faces point into it; turned around
+        // (faces and loops), its shell bounds the cavity, and the solid
+        // refers to it reversed, as STEP voids are.
+        auto closedShell = [&](const std::vector<int>& shell, bool cavity) {
             std::vector<long> faces;
             for (int fi : shell) {
                 const Face& f = faces_[size_t(fi)];
@@ -844,16 +982,24 @@ public:
                 std::vector<long> bounds;
                 for (size_t k = 0; k < f.loops.size(); ++k)
                     bounds.push_back(st.add(std::string(k ? "FACE_BOUND" : "FACE_OUTER_BOUND") + "(''," +
-                                            ref(loop(f.loops[k])) + ",.T.)"));
+                                            ref(loop(f.loops[k])) + (cavity ? ",.F.)" : ",.T.)")));
                 // The inner radial cap faces against its surface's normal.
-                const bool against = f.box == 0 && !flatCap(0);
+                const bool against = (f.box == 0 && !flatCap(0)) != cavity;
                 faces.push_back(st.add("ADVANCED_FACE(" + quote(faceName(f)) + "," + refList(bounds) + "," +
                                        ref(surface) + (against ? ",.F.)" : ",.T.)")));
             }
-            solids.push_back(st.add("MANIFOLD_SOLID_BREP(" + quote(names[solids.size()]) + "," +
-                                    ref(st.add("CLOSED_SHELL(''," + refList(faces) + ")")) + ")"));
+            return st.add("CLOSED_SHELL(''," + refList(faces) + ")");
+        };
+        std::vector<long> out;
+        for (const auto& solid : solids) {
+            const std::string outer = ref(closedShell(solid[0], false)), name = quote(names[out.size()]);
+            std::vector<long> voids;
+            for (size_t k = 1; k < solid.size(); ++k)
+                voids.push_back(st.add("ORIENTED_CLOSED_SHELL('',*," + ref(closedShell(solid[k], true)) + ",.F.)"));
+            out.push_back(st.add(voids.empty() ? "MANIFOLD_SOLID_BREP(" + name + "," + outer + ")"
+                                               : "BREP_WITH_VOIDS(" + name + "," + outer + "," + refList(voids) + ")"));
         }
-        return solids;
+        return out;
     }
 
 private:
@@ -862,12 +1008,16 @@ private:
     };
 
     const Lattice& lat_;
+    Lattice open_;  // lat_ without trimming
     const Shape& shape_;
+    const bool straight_;  // trimmed shape: a straight lattice in mm, built in the parameter box of Shape::map
     const bool mapped_;  // built in a parameter box (see Shape)
     const int periodic_;  // bit per parameter axis that wraps around
     const double tol_;
     int N_[3];
     double H_[3], L_[3], hmin_;
+    double hmm_;  // a grid step in mm (straight_), else in the parameter box
+    std::vector<char> degenerate_;  // edges of zero length on a pole face, out of every loop
     int sx_;
     int64_t sxy_;
     std::vector<Wall> walls_;
@@ -885,6 +1035,10 @@ private:
     std::vector<std::vector<int>> pnbr_;                         // patches sharing an edge
     std::vector<int> rep_;                                       // vertex after collapsing zero-length edges
     std::vector<char> tiny_;                                     // zero-length edges
+    // Vertex key tags (bits 56+) of channel buffer copies: at the plate's
+    // outer level, and at the buffer's end. (15: box corners, 13: slabs,
+    // 0 and 1: walls.)
+    static constexpr int kLiftTag = 12, kOuterTag = 11;
 
     // Periodic axes on whose far face vertex v lies.
     int farFaces(int v) const {
@@ -914,19 +1068,64 @@ private:
 
     // Distance estimate of a point in mm from wall w: |phi| / |grad phi|.
     double distance(int w, Vec3 q) const {
+        if (straight_) return std::fabs(phiAt(w, q)) / norm(gradAt(w, q));
         const Vec3 p = mapped_ ? shape_.unmap(q) : q, g = grad(w, p);
         return std::fabs(phi(w, p)) / norm(mapped_ ? shape_.gradient(p, g) : g);
     }
 
-    // Unit normal in mm, out of the solid, at a point of wall w.
+    // Unit normal in mm, out of the solid, at a point p of wall w.
     Vec3 normal(int w, Vec3 p) const {
-        Vec3 g = grad(w, p);
-        if (mapped_) g = shape_.gradient(p, g);
+        Vec3 g = straight_ ? gradAt(w, shape_.map(p)) : grad(w, p);
+        if (mapped_ && !straight_) g = shape_.gradient(p, g);
         return g * (1.0 / norm(g));
     }
 
+    // The exported region's field at p (negative inside), without trimming.
+    double field(Vec3 p) const {
+        const Vec3 q = straight_ ? shape_.map(p) : p;
+        return open_(q.x, q.y, q.z);
+    }
+
+    // How often the ray from q along the first parameter axis (never
+    // periodic) crosses a shell: its patches as triangles of their samples,
+    // and its planar faces across that axis (caps), in the parameter box.
+    // ponytail: a cap on a face periodic both ways (torus shell) is not a
+    // polygon after welding, so it is missed there; only matters with two or
+    // more solids and a cavity, which then is dropped with a warning.
+    int crossings(const std::vector<int>& shell, Vec3 q) const {
+        int n = 0;
+        auto tri = [&](Vec3 a, Vec3 b, Vec3 c) { n += rayHits(a, b, c, q); };
+        for (int fi : shell) {
+            const Face& f = faces_[size_t(fi)];
+            if (f.patch >= 0) {
+                const auto& g = patches_[size_t(f.patch)].pts;
+                for (size_t i = 0; i + 1 < g.size(); ++i)
+                    for (size_t j = 0; j + 1 < g.size(); ++j)
+                        tri(g[i][j], g[i + 1][j], g[i + 1][j + 1]), tri(g[i][j], g[i + 1][j + 1], g[i][j + 1]);
+                continue;
+            }
+            const double x0 = edges_[size_t(f.loops[0][0].first)].pts[0].x;
+            bool across = x0 > q.x, in = false;
+            for (const Loop& l : f.loops)
+                for (const auto& [e, same] : l) {
+                    const auto& p = edges_[size_t(e)].pts;
+                    for (size_t k = 0; k + 1 < p.size() && across; ++k) {
+                        across = std::fabs(p[k].x - x0) < 1e-9 * hmin_;
+                        if ((p[k].y > q.y) != (p[k + 1].y > q.y) &&
+                            q.z < p[k].z + (p[k + 1].z - p[k].z) * (q.y - p[k].y) / (p[k + 1].y - p[k].y))
+                            in = !in;
+                    }
+                }
+            n += across && in;
+        }
+        return n;
+    }
+
     // Box face F is capped by a plane (else a cylinder or torus around z).
-    bool flatCap(int F) const { return shape_.kind == ShapeKind::Box || (shape_.kind == ShapeKind::Tube && F / 2 == 2); }
+    bool flatCap(int F) const {
+        const bool tube = shape_.kind == ShapeKind::Tube || shape_.kind == ShapeKind::Cylinder;
+        return shape_.kind == ShapeKind::Box || (tube && F / 2 == 2);
+    }
 
     // Agglomerative clustering of adjacent patches: merge the neighbor pair
     // whose union has the narrowest normal cone, while every normal stays
@@ -1212,9 +1411,36 @@ private:
     double nodePhi(int w, const int i[3]) const { return phi_[size_t(w)][size_t(node(i))]; }
     Vec3 nodePos(const int i[3]) const { return {i[0] * H_[0], i[1] * H_[1], i[2] * H_[2]}; }
 
-    double phi(int w, Vec3 p) const {
+    // phi at a point of the lattice: mm, or the parameter box of a mapped shape.
+    double phiAt(int w, Vec3 q) const {
         const Wall& W = walls_[size_t(w)];
-        return W.sign * (lat_.value(p.x, p.y, p.z) - W.levelSign * lat_.levelAt(p.x, p.y, p.z));
+        return W.sign * (lat_.value(q.x, q.y, q.z) - W.levelSign * lat_.levelAt(q.x, q.y, q.z));
+    }
+
+    // phi at a point of the parameter box.
+    double phi(int w, Vec3 p) const { return phiAt(w, straight_ ? shape_.map(p) : p); }
+
+    // Straight: the gradient of phi in mm, and Newton steps onto phi = 0 in mm.
+    Vec3 gradAt(int w, Vec3 q) const {
+        const double d = 1e-6 * hmm_;
+        Vec3 g;
+        for (int a = 0; a < 3; ++a) {
+            Vec3 u = q, v = q;
+            u[a] += d, v[a] -= d;
+            g[a] = (phiAt(w, u) - phiAt(w, v)) / (2 * d);
+        }
+        return g;
+    }
+    Vec3 projectAt(int w, Vec3 q) const {
+        for (int it = 0; it < 50; ++it) {
+            const double v = phiAt(w, q);
+            const Vec3 g = gradAt(w, q);
+            if (std::fabs(v) < 1e-13 || dot(g, g) == 0) break;
+            Vec3 step = g * (v / dot(g, g));
+            if (norm(step) > 0.25 * hmm_) step = step * (0.25 * hmm_ / norm(step));
+            q = q - step;
+        }
+        return q;
     }
 
     Vec3 grad(int w, Vec3 p) const {
@@ -1247,6 +1473,9 @@ private:
             Vec3 step = g * (v / gg);
             if (norm(step) > maxStep) step = step * (maxStep / norm(step));
             p = p - step;
+            // A pole face is the axis or a pole: beyond it the map folds back.
+            for (int F = 0; F < 6; ++F)
+                if (shape_.pole(F)) p[F / 2] = F % 2 ? std::min(p[F / 2], L_[F / 2]) : std::max(p[F / 2], 0.0);
         }
         return p;
     }
@@ -1348,6 +1577,21 @@ private:
         // crossings lie next to the surface.
         Vec3 p = project(w, sum * (1.0 / double(crossings.size())), fixed);
         for (size_t k = 0; k < crossings.size() && std::fabs(phi(w, p)) > 1e-9; ++k) p = project(w, crossings[k], fixed);
+        if (bitCount(mask) == 1) {
+            // A box edge: the root inside its own grid edge, by bisection.
+            // Newton can run along the edge to a neighbor's root, and the
+            // caps then get the box edge's vertices out of order.
+            int b = 0;
+            while (!(mask >> b & 1)) ++b;
+            Vec3 A = nodePos(lo), B = A;
+            B[b] += H_[b];
+            const bool aIn = phi(w, A) < 0;
+            for (int it = 0; it < 64; ++it) {
+                const Vec3 M = (A + B) * 0.5;
+                ((phi(w, M) < 0) == aIn ? A : B) = M;
+            }
+            p = (A + B) * 0.5;
+        }
         offSurface_ |= std::fabs(phi(w, p)) > 1e-9;
         verts_.push_back({p, faces, key});
         vertOf_.emplace(key, int(verts_.size()) - 1);
@@ -1394,7 +1638,7 @@ private:
     // or on a curved shape a curve through 32 samples per cell.
     void sampleLine(Edge& e) const {
         const Vec3 A = verts_[size_t(e.a)].p, B = verts_[size_t(e.b)].p;
-        const int k = shape_.bent() ? std::max(8, int(32 * norm(B - A))) : 1;
+        const int k = shape_.bent() || straight_ ? std::max(8, int(32 * norm(B - A))) : 1;
         e.pts.clear();
         for (int i = 0; i <= k; ++i) e.pts.push_back(A + (B - A) * (double(i) / k));
         e.mm = mapped(e.pts);
@@ -1404,9 +1648,13 @@ private:
     // A line if the mm samples are straight, else a curve within tol / 4.
     void fitLine(Edge& e) const {
         const Vec3 a = e.mm.front(), d = e.mm.back() - a;
-        bool straight = norm(d) > 0;  // closed: a curve
-        for (const Vec3& q : e.mm) straight = straight && norm(cross(q - a, d)) <= 1e-9 * dot(d, d);
+        bool straight = norm(d) > 0, point = true;  // closed: a curve; on a pole: a point
+        for (const Vec3& q : e.mm) {
+            straight = straight && norm(cross(q - a, d)) <= 1e-9 * dot(d, d);
+            point = point && norm(q - a) <= 1e-12 * (shape_.r1 + shape_.major + shape_.height);
+        }
         e.knots.clear();
+        if (point) return e.mm = {a, a}, e.ctrl.clear();
         if (!straight) return fitCurve(e.mm, 0.25 * tol_, e.ctrl, e.knots);
         e.mm = {a, e.mm.back()};
         e.ctrl.clear();
@@ -1476,7 +1724,7 @@ private:
                 for (size_t k = 0; k < m; ++k)
                     for (size_t l = 0; l < m; ++l) q = q + p.ctrl[k][l] * (sp.mid[i][k] * sp.mid[j][l]);
                 err = std::max(err, distance(p.wall, q));
-                p.mids.push_back(mm(project(p.wall, mapped_ ? shape_.unmap(q) : q, 0)));
+                p.mids.push_back(straight_ ? projectAt(p.wall, q) : mm(project(p.wall, mapped_ ? shape_.unmap(q) : q, 0)));
             }
         return err;
     }
@@ -1559,7 +1807,7 @@ private:
     // a periodic axis is a seam, not a cap.
     bool buildCaps(int F, std::string& error) {
         const int a = F / 2, side = F % 2;
-        if (periodic_ >> a & 1) return true;
+        if ((periodic_ >> a & 1) || shape_.pole(F)) return true;
         const int s = side ? (a + 1) % 3 : (a + 2) % 3, t = side ? (a + 2) % 3 : (a + 1) % 3;  // e_s x e_t = outward
         std::vector<Directed> de;
         for (const Patch& p : patches_)
@@ -1580,6 +1828,7 @@ private:
             perim.push_back({pos, int(id)});
         }
         std::sort(perim.begin(), perim.end());
+        if (shape_.headerChannel(F) >= 0) return buildHeader(F, shape_.headerChannel(F), de, perim, error);
         // A slab (plate or buffer) on this face covers it: the cap turns into
         // its complement on the face, facing the other way. That takes the
         // outside parts of the perimeter, backwards, and the same patch
@@ -1589,7 +1838,7 @@ private:
         for (size_t k = 0; k < perim.size(); ++k) {
             const int x = perim[k].second, y = perim[(k + 1) % perim.size()].second;
             const Vec3 m = (verts_[size_t(x)].p + verts_[size_t(y)].p) * 0.5;
-            if ((lat_(m.x, m.y, m.z) < 0) == slab) continue;
+            if ((field(m) < 0) == slab) continue;
             const int e = edge(x, y, -1);
             sampleLine(edges_[size_t(e)]);
             if (slab) de.push_back({y, x, e, edges_[size_t(e)].a == y});
@@ -1624,21 +1873,9 @@ private:
                 vertOf_.emplace(key, o[k]);
             }
         }
-        auto line = [&](int x, int y, Loop& loop) {
-            const int e = edge(x, y, -1);
-            sampleLine(edges_[size_t(e)]);
-            loop.push_back({e, edges_[size_t(e)].a == x});
-        };
-        auto plane = [&](Loop loop, Vec3 origin, Vec3 normal, double area, const std::string& name) {
-            Face f;
-            f.loops.push_back(loop);
-            f.origin = origin, f.normal = normal, f.name = name;
-            f.volume = normal.x * shape_.flux(origin) * area;  // flux (Phi, 0, 0); Phi = x on the box
-            faces_.push_back(f);
-        };
         Loop outer;
         for (int k = 0; k < 4; ++k) line(o[k], o[(k + 1) % 4], outer);
-        plane(outer, verts_[size_t(o[0])].p, n, S * T, shape_.faceName(F));
+        addPlane(outer, verts_[size_t(o[0])].p, n, S * T, shape_.faceName(F));
         for (int k = 0; k < 4; ++k) {
             std::vector<int> along = {c[k]};
             for (const auto& [pos, v] : perim)
@@ -1650,12 +1887,272 @@ private:
             line(c[next], o[next], loop);
             line(o[next], o[k], loop);
             line(o[k], c[k], loop);
-            // Side k of F lies on the face across t (k = 0, 2) or s (k = 1, 3).
-            const int axis = k % 2 ? s : t, G = 2 * axis + int(k == 1 || k == 2);
-            Vec3 normal;
-            normal[axis] = G % 2 ? 1.0 : -1.0;
-            plane(loop, verts_[size_t(c[k])].p, normal, thick * (k % 2 ? T : S), shape_.faceName(G));
+            const auto [G, normal] = sideFace(F, k);
+            addPlane(loop, verts_[size_t(c[k])].p, normal, thick * (k % 2 ? T : S), shape_.faceName(G));
         }
+    }
+
+    // A box edge segment from x to y, appended to a loop.
+    void line(int x, int y, Loop& loop) {
+        const int e = edge(x, y, -1);
+        sampleLine(edges_[size_t(e)]);
+        loop.push_back({e, edges_[size_t(e)].a == x});
+    }
+
+    // A planar face given by its plane; area for its volume term, the flux
+    // (Phi, 0, 0) through it (Phi = x on the box).
+    void addPlane(const Loop& loop, Vec3 origin, Vec3 normal, double area, const std::string& name) {
+        Face f;
+        f.loops.push_back(loop);
+        f.origin = origin, f.normal = normal, f.name = name;
+        f.volume = normal.x * shape_.flux(origin) * area;
+        faces_.push_back(f);
+    }
+
+    // Side k of box face F (from corner k to k + 1, counter-clockwise about
+    // F's outward normal) lies on the face across t (k = 0, 2) or s (k = 1,
+    // 3): that face G and its outward normal.
+    std::pair<int, Vec3> sideFace(int F, int k) const {
+        const int a = F / 2, side = F % 2;
+        const int s = side ? (a + 1) % 3 : (a + 2) % 3, t = side ? (a + 2) % 3 : (a + 1) % 3;
+        const int axis = k % 2 ? s : t, G = 2 * axis + int(k == 1 || k == 2);
+        Vec3 normal;
+        normal[axis] = G % 2 ? 1.0 : -1.0;
+        return {G, normal};
+    }
+
+    // Corner k of box face F, counter-clockwise about its outward normal.
+    int faceCorner(int F, int k) {
+        const int a = F / 2, side = F % 2;
+        const int s = side ? (a + 1) % 3 : (a + 2) % 3, t = side ? (a + 2) % 3 : (a + 1) % 3;
+        return cornerVertex(side << a | int(k == 1 || k == 2) << s | int(k >= 2) << t);
+    }
+
+    // The copy of vertex v moved by `by` off box face F (channel buffers);
+    // `tag` tells the levels apart.
+    int liftedVertex(int v, int F, int tag, Vec3 by) {
+        const uint64_t key = (uint64_t(tag) << 56) | (uint64_t(F) << 48) | uint64_t(v);
+        if (auto it = vertOf_.find(key); it != vertOf_.end()) return it->second;
+        verts_.push_back({verts_[size_t(v)].p + by, 0, key});
+        vertOf_.emplace(key, int(verts_.size()) - 1);
+        return int(verts_.size()) - 1;
+    }
+
+    // The copy of wall edge e moved by `by` off box face F: its fine
+    // samples and control points, moved. Returns it, and whether it runs
+    // the other way (from the copy of e.b to the copy of e.a).
+    std::pair<int, bool> liftedEdge(int e, int F, Vec3 by) {
+        const int x = liftedVertex(edges_[size_t(e)].a, F, kLiftTag, by);
+        const int y = liftedVertex(edges_[size_t(e)].b, F, kLiftTag, by);
+        const int id = edge(x, y, -1);
+        const Edge& E = edges_[size_t(e)];
+        Edge& c = edges_[size_t(id)];
+        const bool swapped = c.a != x;
+        c.pts = finePoints(E, false), c.mm = finePoints(E, true), c.ctrl = E.ctrl, c.knots = E.knots;
+        for (auto* ps : {&c.pts, &c.mm, &c.ctrl})
+            for (Vec3& q : *ps) q = q + by;
+        if (swapped) {
+            for (auto* ps : {&c.pts, &c.mm, &c.ctrl}) std::reverse(ps->begin(), ps->end());
+            std::reverse(c.knots.begin(), c.knots.end());
+            for (double& k : c.knots) k = 1 - k;
+        }
+        return {id, swapped};
+    }
+
+    // Channel buffers on box face F for fluid channel K (0: A, f > c; 1: B,
+    // f < -c); its other channel is O. A header plate `header` mm thick
+    // covers F, with holes where K opens; for the void part, a buffer
+    // `buffer` mm long lies beyond it.
+    //  - On F, O's openings are closed by the plate: for the solid the
+    //    plate's face over them (facing into the box), for the void O's caps.
+    //    Both face the plate: wall O.
+    //  - Each run of K's wall edges on F (from the perimeter back to it, or
+    //    a loop) is extruded through the plate: one ruled B-spline face, the
+    //    hole's wall (wall K). Its curve is fitted to the run within tol / 4.
+    //  - At the plate's outer level: F minus the holes, the plate's face
+    //    (solid) or the buffer's inner face (void): wall K.
+    //  - The perimeter of F, at that level, is one line per run of it that
+    //    K does not open on, per side. Solid: the plate's sides, one face
+    //    per such run. Void: one face per side of F, the buffer's side,
+    //    which reaches down to F where a hole meets the side; and the
+    //    buffer's end, the port, named after F.
+    bool buildHeader(int F, int K, const std::vector<Directed>& de, const std::vector<std::pair<double, int>>& perim,
+                     std::string& error) {
+        const int a = F / 2, side = F % 2, O = 1 - K;
+        const bool solid = lat_.part == Part::Solid;
+        Vec3 n;  // F's outward normal
+        n[a] = side ? 1.0 : -1.0;
+        const Vec3 up = n * shape_.header;
+        auto lift = [&](int v) { return liftedVertex(v, F, kLiftTag, up); };
+        auto onPerimeter = [&](int v) { return bitCount(verts_[size_t(v)].faces) >= 2; };
+
+        // The channel (0, 1, or -1: the sheet) of each perimeter interval,
+        // from perim[j] to perim[j + 1]; corners are in perim, so each lies
+        // on one side.
+        const size_t np = perim.size();
+        std::vector<int> chan(np);
+        for (size_t j = 0; j < np; ++j) {
+            const Vec3 m = (verts_[size_t(perim[j].second)].p + verts_[size_t(perim[(j + 1) % np].second)].p) * 0.5;
+            const double f = open_.value(m.x, m.y, m.z), c = open_.levelAt(m.x, m.y, m.z);
+            chan[j] = f > c ? 0 : f < -c ? 1 : -1;
+        }
+        auto segment = [&](size_t j) {  // the box edge segment of interval j, sampled
+            const int e = edge(perim[j].second, perim[(j + 1) % np].second, -1);
+            sampleLine(edges_[size_t(e)]);
+            return e;
+        };
+        std::vector<Directed> walls[2];  // de on wall A (f = c) and on wall B (f = -c)
+        for (const Directed& d : de) walls[edges_[size_t(d.edge)].wall].push_back(d);
+
+        // O's openings on F.
+        std::vector<Directed> cap = walls[O];
+        for (size_t j = 0; j < np; ++j) {
+            if (chan[j] != O) continue;
+            const int x = perim[j].second, y = perim[(j + 1) % np].second, e = segment(j);
+            if (solid) cap.push_back({y, x, e, edges_[size_t(e)].a == y});  // the complement of the solid's cap
+            else cap.push_back({x, y, e, edges_[size_t(e)].a == x});
+        }
+        size_t first = faces_.size();
+        if (!closeCaps(F, cap, false, error, solid)) return false;
+        for (size_t f = first; f < faces_.size(); ++f) faces_[f].wall = O, faces_[f].name.clear();
+
+        // The holes: runs of K's wall edges, walked as the part's cap on F
+        // would walk them.
+        std::unordered_map<int, size_t> next;
+        for (size_t k = 0; k < walls[K].size(); ++k) next[walls[K][k].from] = k;
+        std::vector<char> used(walls[K].size(), 0);
+        std::vector<std::vector<Directed>> runs;
+        auto walk = [&](size_t k) {
+            std::vector<Directed> run;
+            while (!used[k]) {
+                used[k] = 1;
+                run.push_back(walls[K][k]);
+                if (onPerimeter(run.back().to)) break;
+                const auto it = next.find(run.back().to);
+                if (it == next.end()) return false;
+                k = it->second;
+            }
+            runs.push_back(run);
+            return true;
+        };
+        for (int pass = 0; pass < 2; ++pass)  // runs from the perimeter first, then loops
+            for (size_t k = 0; k < walls[K].size(); ++k)
+                if (!used[k] && (pass || onPerimeter(walls[K][k].from)) && !walk(k))
+                    return error = "channel buffer: open hole boundary", false;
+        std::vector<Directed> top;  // the boundary at the outer level, as closeCaps takes it
+        for (const auto& run : runs) {
+            std::vector<Vec3> pts;  // fine samples along the run, mm
+            for (const Directed& d : run) {
+                std::vector<Vec3> s = finePoints(edges_[size_t(d.edge)], true);
+                if (!d.same) std::reverse(s.begin(), s.end());
+                pts.insert(pts.end(), s.begin() + (pts.empty() ? 0 : 1), s.end());
+            }
+            // u along the run as the cap walks it, v up: the normal points
+            // out of the part (into the hole for the solid, into the plate
+            // for the fluid).
+            Face hole;
+            std::vector<Vec3> ctrl;
+            fitCurve(pts, 0.25 * tol_, ctrl, hole.knots[0]);
+            for (const Vec3& c : ctrl) hole.ctrl.push_back({c, c + up});
+            hole.knots[1] = {0, 0, 1, 1}, hole.degree[1] = 1;
+            hole.wall = K;
+            for (size_t i = 0; i + 1 < pts.size(); ++i)  // flux (Phi, 0, 0) through the strips
+                hole.volume += shape_.flux((pts[i] + pts[i + 1] + up) * 0.5) * cross(pts[i + 1] - pts[i], up).x;
+            Loop loop;
+            for (const Directed& d : run) loop.push_back({d.edge, d.same});
+            const int p0 = run.front().from, p1 = run.back().to;
+            line(p1, lift(p1), loop);  // up (for a loop, its seam)
+            for (auto it = run.rbegin(); it != run.rend(); ++it) {
+                const auto [e, swapped] = liftedEdge(it->edge, F, up);
+                loop.push_back({e, it->same == swapped});  // back along the top
+                top.push_back({lift(it->from), lift(it->to), e, it->same != swapped});
+            }
+            line(lift(p0), p0, loop);  // down
+            hole.loops.push_back(loop);
+            faces_.push_back(hole);
+        }
+
+        // Perimeter runs that K does not open on, per side: their ends are
+        // K's crossings or corners. Side k runs from corner k to corner k + 1.
+        const Vec3 out = n * (shape_.header + shape_.buffer);
+        int corner[4], far[4];
+        size_t start[5];  // index in perim of each corner
+        for (int k = 0; k < 4; ++k) {
+            corner[k] = faceCorner(F, k);
+            far[k] = liftedVertex(corner[k], F, kOuterTag, out);
+            start[k] = size_t(std::find_if(perim.begin(), perim.end(), [&](const auto& pv) { return pv.second == corner[k]; }) -
+                              perim.begin());
+        }
+        start[4] = np;
+        for (int k = 0; k < 4; ++k) {
+            const auto [G, normal] = sideFace(F, k);
+            const Vec3 origin = verts_[size_t(corner[k])].p;
+            // Intervals start[k] .. start[k + 1] - 1 lie on this side.
+            Loop loop;               // void: the buffer's side face
+            std::vector<Vec3> poly;  // its corners, for the area
+            bool low = chan[start[k]] == K;  // at F (in a hole) rather than at the plate's outer level
+            const int from = low ? corner[k] : lift(corner[k]);
+            poly.push_back(verts_[size_t(from)].p);
+            for (size_t j = start[k]; j < start[k + 1];) {
+                const int x = perim[j].second;
+                if (chan[j] == K) {
+                    if (!low) line(lift(x), x, loop), poly.push_back(verts_[size_t(x)].p), low = true;
+                    const int e = segment(j);
+                    loop.push_back({e, edges_[size_t(e)].a == x});
+                    poly.push_back(verts_[size_t(perim[(j + 1) % np].second)].p);
+                    ++j;
+                    continue;
+                }
+                size_t j1 = j;  // the run of intervals K does not open on
+                while (j1 < start[k + 1] && chan[j1] != K) ++j1;
+                const int y = perim[j1 % np].second;
+                if (low) line(x, lift(x), loop), poly.push_back(verts_[size_t(lift(x))].p), low = false;
+                const int e = edge(lift(x), lift(y), -1);
+                sampleLine(edges_[size_t(e)]);
+                loop.push_back({e, edges_[size_t(e)].a == lift(x)});
+                poly.push_back(verts_[size_t(lift(y))].p);
+                // The face at the outer level runs it forward (solid, as F's
+                // cap would) or backwards (void, flipped like a slab's).
+                if (solid) top.push_back({lift(x), lift(y), e, edges_[size_t(e)].a == lift(x)});
+                else top.push_back({lift(y), lift(x), e, edges_[size_t(e)].a == lift(y)});
+                if (solid) {  // the plate's side along this run
+                    Loop strip;
+                    for (size_t q = j; q < j1; ++q) {
+                        const int sq = segment(q);
+                        strip.push_back({sq, edges_[size_t(sq)].a == perim[q].second});
+                    }
+                    line(y, lift(y), strip);
+                    strip.push_back({e, edges_[size_t(e)].a == lift(y)});
+                    line(lift(x), x, strip);
+                    addPlane(strip, verts_[size_t(x)].p, normal, shape_.header * norm(verts_[size_t(y)].p - verts_[size_t(x)].p),
+                             shape_.faceName(G));
+                }
+                j = j1;
+            }
+            if (solid) continue;
+            const int to = low ? corner[(k + 1) % 4] : lift(corner[(k + 1) % 4]);
+            line(to, far[(k + 1) % 4], loop);
+            line(far[(k + 1) % 4], far[k], loop);
+            line(far[k], from, loop);
+            poly.push_back(verts_[size_t(far[(k + 1) % 4])].p);
+            poly.push_back(verts_[size_t(far[k])].p);
+            Vec3 area;
+            for (size_t q = 0; q < poly.size(); ++q) area = area + cross(poly[q], poly[(q + 1) % poly.size()]);
+            addPlane(loop, origin, normal, 0.5 * std::fabs(dot(area, normal)), shape_.faceName(G));
+        }
+
+        // The plate's outer face (solid), or the buffer's inner face facing
+        // the plate (void, flipped); and the buffer's end.
+        first = faces_.size();
+        if (!closeCaps(F, top, false, error, !solid, shape_.header)) return false;
+        for (size_t f = first; f < faces_.size(); ++f) faces_[f].wall = K, faces_[f].name.clear();
+        if (!solid) {
+            Loop end;
+            for (int k = 0; k < 4; ++k) line(far[k], far[(k + 1) % 4], end);
+            const int s = side ? (a + 1) % 3 : (a + 2) % 3, t = side ? (a + 2) % 3 : (a + 1) % 3;
+            addPlane(end, verts_[size_t(far[0])].p, n, L_[s] * L_[t], shape_.faceName(F));
+        }
+        return true;
     }
 
     // Walks directed edges on box face F into loops and adds the cap faces:
@@ -1664,8 +2161,10 @@ private:
     // parameter box, or in mm for a flat cap welded across the seam (its
     // parameter rectangle is cut there).
     // With `flip`, the faces face against F's outward normal (the complement
-    // of the cap under a slab): their outer loops run the other way.
-    bool closeCaps(int F, const std::vector<Directed>& de, bool inMm, std::string& error, bool flip = false) {
+    // of the cap under a slab): their outer loops run the other way. With
+    // `offset`, they lie that far out of the box (channel buffers).
+    bool closeCaps(int F, const std::vector<Directed>& de, bool inMm, std::string& error, bool flip = false,
+                   double offset = 0) {
         const int a = F / 2, side = F % 2;
         const int s = side ? (a + 1) % 3 : (a + 2) % 3, t = side ? (a + 2) % 3 : (a + 1) % 3;  // e_s x e_t = outward
         Vec3 nrm, e1{1, 0, 0};
@@ -1728,18 +2227,23 @@ private:
         if (flip)
             for (double& ar : areas) ar = -ar;
         std::unordered_map<size_t, size_t> faceOf;
+        // A plane moved off F holds its volume term directly: flux (Phi, 0,
+        // 0) times the signed loop area (holes count negative).
+        auto volume = [&](const Face& f, size_t k) {
+            return offset ? f.normal.x * shape_.flux(f.origin) * areas[k] : inMm ? 0 : capVolume(F, polys[k]);
+        };
         for (size_t k = 0; k < loops.size(); ++k) {
             if (areas[k] <= 0) continue;
             faceOf[k] = faces_.size();
             Face f;
             f.box = F;
-            if (flip) {  // a plane facing into the box, named after the wall its patch edges belong to
+            if (flip || offset) {  // a plane facing into the box (named after the wall its patch edges belong to), or moved
                 f.box = -1;
-                f.origin[a] = side ? L_[a] : 0.0;
-                f.normal[a] = side ? -1.0 : 1.0;
+                f.origin[a] = side ? L_[a] + offset : -offset;
+                f.normal[a] = (side ? 1.0 : -1.0) * (flip ? -1 : 1);
             }
             f.loops.push_back(loops[k]);
-            f.volume = inMm ? 0 : capVolume(F, polys[k]);
+            f.volume = volume(f, k);
             faces_.push_back(f);
         }
         for (size_t k = 0; k < loops.size(); ++k) {
@@ -1753,7 +2257,7 @@ private:
             }
             Face& f = faces_[faceOf[best]];
             f.loops.push_back(loops[k]);
-            f.volume += inMm ? 0 : capVolume(F, polys[k]);
+            f.volume += volume(f, k);
         }
         for (const auto& [k, fi] : faceOf) {
             if (!flip) continue;
@@ -1769,64 +2273,189 @@ private:
     }
 };
 
+using Shells = std::vector<std::pair<std::vector<int>, double>>;
+
+// Builds the patches, fits them with more samples until within tol, and
+// checks the result: closed shells, and an enclosed volume within 2 % of the
+// shape's from the field's. False with r.error set otherwise.
+bool build(Builder& b, double tol, double fieldVolume, double shapeVolume, SmoothReport& r, Shells& shells) {
+    b.buildPatches();
+    for (int n = 4; r.error.empty(); n *= 2) {
+        r.maxError = b.run(n, r.error);
+        r.samples = n;
+        // A large error is folded geometry, which more samples do not fix.
+        if (r.maxError <= tol || r.maxError > 20 * tol || n >= 32) break;
+    }
+    if (r.error.empty() && r.maxError > tol) r.error = "fit error above tolerance";
+    if (!r.error.empty() || !b.weld(r.error) || !b.shells(shells, r.error)) return false;
+    double total = 0;
+    for (const auto& s : shells) total += s.second;
+    if (std::fabs(total - fieldVolume) > 0.02 * shapeVolume) {
+        r.error = "enclosed volume does not match the field (folded patches)";
+        return false;
+    }
+    return true;
+}
+
+// The first patch count from `first` to `last` that builds one cell of the
+// lattice alone (a box of one cell, in the parameter box's units for a
+// mapped shape), or `first` if none does.
+int probeCell(const Lattice& lat, int first, int last, double tol) {
+    Lattice one = lat;
+    one.shape = Shape{};
+    for (int a = 0; a < 3; ++a) one.shape.cellSize[a] = lat.cell[a];
+    // Mapped: the fit error is in parameter units here; one unit is at least
+    // minCell mm, so this tolerance is never stricter than the real one.
+    if (lat.shape.mapped()) tol /= lat.shape.minCell();
+    const double volume = lat.cell[0] * lat.cell[1] * lat.cell[2];
+    const double phi = 1.2207440846057595, step[3] = {1 / phi, 1 / (phi * phi), 1 / (phi * phi * phi)};
+    double in = 0;  // quasi-random samples of the field, as in sampledFraction
+    const int samples = 1 << 16;
+    for (int k = 0; k < samples; ++k) {
+        Vec3 p;
+        for (int a = 0; a < 3; ++a) p[a] = std::fmod(0.5 + k * step[a], 1.0) * lat.cell[a];
+        in += one(p.x, p.y, p.z) < 0;
+    }
+    const int cells[3] = {1, 1, 1};
+    for (int p = first; p <= last; ++p) {
+        Builder b(one, cells, p, tol);
+        SmoothReport r;
+        Shells shells;
+        if (build(b, tol, volume * in / samples, volume, r, shells)) return p;
+    }
+    return first;
+}
+
 }  // namespace
 
 SmoothReport writeSmoothStep(const std::string& path, const std::string& name, const Lattice& lat,
                              const int cells[3], int patches, double tol, double minFragment, bool exact,
-                             double fieldVolume, double shapeVolume) {
+                             double fieldVolume, double shapeVolume, bool splitChannels) {
     // A coarse patch grid can miss small features: a tunnel inside two cells,
-    // or a corner that does not converge. The lattice repeats per cell, so a
-    // patch count that is valid for one cell is valid for all. Step it up
-    // until the topology is closed and the fit is within tolerance.
-    // Folded patches can still close up, so also compare the enclosed volume
-    // with the field's.
+    // or a corner that does not converge. Step it up until the topology is
+    // closed and the fit is within tolerance. Folded patches can still close
+    // up, so also compare the enclosed volume with the field's.
+    // An ungraded lattice repeats per cell, so the search starts on one cell
+    // alone, which is much faster; the whole model then usually needs one
+    // try. It still steps up if that fails (cut cells, the stretch of a
+    // mapped shape).
+    const int last = std::max(patches + 7, 16);
+    // Trimmed: built in the parameter box of Shape::map, with steps of about
+    // one cell at the outside: the patch grid is per such step.
+    Lattice L = lat;
+    int pc[3] = {cells[0], cells[1], cells[2]};
+    if (lat.shape.trimmed()) {
+        const Shape& s = lat.shape;
+        const double c = std::min({lat.cell[0], lat.cell[1], lat.cell[2]}), pi = 0.5 * kTwoPi;
+        auto steps = [&](double length, int least) { return std::max(least, int(std::lround(length / c))); };
+        pc[0] = steps(s.r1, 1);
+        pc[1] = steps(2 * pi * (s.r1 + s.major), 3);
+        pc[2] = s.kind == ShapeKind::Cylinder ? steps(s.height, 1) : s.kind == ShapeKind::Sphere ? steps(pi * s.r1, 2) : steps(2 * pi * s.r1, 3);
+        for (int a = 0; a < 3; ++a) L.shape.cells[a] = pc[a];
+        if (s.kind == ShapeKind::Sphere) {
+            // A face around both poles cannot be read back (the reader
+            // cannot tell its inside), and a symmetric axis can put both on
+            // a wall (the gyroid's z axis). Take a generic axis whose poles
+            // lie outside the part, or else in different regions (one
+            // outside, or a sheet's two fluid channels), never both in one.
+            Lattice open = lat;
+            open.shape = Shape{};
+            const bool channels = lat.form == Form::Sheet && lat.part == Part::Void;
+            auto region = [&](Vec3 q) {  // 0 outside the part, else 1 (or 2: a sheet's channel f < -c)
+                return open(q.x, q.y, q.z) > 0 ? 0 : channels && open.value(q.x, q.y, q.z) < 0 ? 2 : 1;
+            };
+            auto score = [&](Vec3 d) {
+                const int a = region(d * s.r1), b = region(d * -s.r1);
+                return a == 0 && b == 0 ? 2 : a != b ? 1 : 0;
+            };
+            Vec3 best{0, 0, 1};
+            for (int k = 0, most = -1; k < 40 && most < 2; ++k) {  // directions spread over the sphere
+                const double z = 1 - (2 * k + 1) / 40.0, rho = std::sqrt(1 - z * z), phi = 2.399963 * k;
+                const Vec3 d{rho * std::cos(phi), rho * std::sin(phi), z};
+                if (score(d) > most) most = score(d), best = d;
+            }
+            Vec3 x = cross(best, std::fabs(best.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0});
+            x = x * (1 / norm(x));
+            L.shape.frame[0] = x, L.shape.frame[1] = cross(best, x), L.shape.frame[2] = best;
+        }
+    } else if (lat.grade < 0 && cells[0] * cells[1] * cells[2] > 1) {
+        patches = probeCell(lat, patches, last, tol);
+    }
     SmoothReport r;
-    for (int p = patches; p <= std::max(patches + 7, 16); ++p) {
+    for (int p = patches; p <= last; ++p) {
         r = SmoothReport{};
         r.patches = p;
-        Builder b(lat, cells, p, tol);
-        b.buildPatches();
-        for (int n = 4; r.error.empty(); n *= 2) {
-            r.maxError = b.run(n, r.error);
-            r.samples = n;
-            // A large error is folded geometry, which more samples do not fix.
-            if (r.maxError <= tol || r.maxError > 20 * tol || n >= 32) break;
-        }
-        if (r.error.empty() && r.maxError > tol) r.error = "fit error above tolerance";
-        std::vector<std::pair<std::vector<int>, double>> shells;
-        if (!r.error.empty() || !b.weld(r.error) || !b.shells(shells, r.error)) continue;
-        double total = 0, maxVol = 0;
-        for (const auto& s : shells) total += s.second, maxVol = std::max(maxVol, s.second);
-        if (std::fabs(total - fieldVolume) > 0.02 * shapeVolume) {
-            r.error = "enclosed volume does not match the field (folded patches)";
-            continue;
-        }
+        Builder b(L, pc, p, tol);
+        Shells shells;
+        if (!build(b, tol, fieldVolume, shapeVolume, r, shells)) continue;
+        double maxVol = 0;
+        for (const auto& s : shells) maxVol = std::max(maxVol, s.second);
         r.patchFaces = 0;
         for (const auto& s : shells) r.patchFaces += s.first.size();
+        std::vector<int> host = b.hosts(shells);  // the solid of each inner cavity
         double mergeErr = 0;
+        const std::vector<int> shellOf = b.vertexShells(shells);
         r.merged = !exact && b.merge(mergeErr, r.warning);
         if (r.merged) {
             r.maxError = std::max(r.maxError, mergeErr);
+            const size_t before = shells.size();
             shells.clear();
             b.shells(shells, r.error);  // merge() already checked it
+            // The same shells, renumbered: match them through a vertex.
+            std::vector<int> now(before, -1), old(shells.size());
+            for (size_t k = 0; k < shells.size(); ++k) now[size_t(old[k] = shellOf[size_t(b.shellVertex(shells[k].first))])] = int(k);
+            std::vector<int> moved(shells.size());
+            for (size_t k = 0; k < shells.size(); ++k) moved[k] = host[size_t(old[k])] < 0 ? host[size_t(old[k])] : now[size_t(host[size_t(old[k])])];
+            host.swap(moved);
         }
-        std::vector<std::vector<int>> kept;
-        for (const auto& [faces, vol] : shells) {
-            if (vol <= 0) ++r.cavities;
-            else if (vol < minFragment * maxVol) ++r.fragments;
-            else {
-                kept.push_back(faces);
-                r.volume += vol;
-                r.faces += faces.size();
-            }
+        // Solids: kept outer shells, each with the cavities inside it. The
+        // cavities of a dropped fragment go with it.
+        std::vector<std::vector<std::vector<int>>> kept;
+        std::vector<int> solidOf(shells.size(), -1);
+        for (size_t k = 0; k < shells.size(); ++k) {
+            const auto& [faces, vol] = shells[k];
+            if (vol <= 0) continue;
+            if (vol < minFragment * maxVol) ++r.fragments;
+            else solidOf[k] = int(kept.size()), kept.push_back({faces});
         }
+        for (size_t k = 0; k < shells.size(); ++k) {
+            if (host[k] == -1) continue;
+            if (-shells[k].second < minFragment * maxVol) host[k] = -1, ++r.fragments;  // tiny: filled
+            else if (host[k] == -2) ++r.cavities;
+            else if (solidOf[size_t(host[k])] >= 0) kept[size_t(solidOf[size_t(host[k])])].push_back(shells[k].first);
+        }
+        for (size_t k = 0; k < shells.size(); ++k)
+            if (solidOf[k] >= 0 || (host[k] >= 0 && solidOf[size_t(host[k])] >= 0))
+                r.volume += shells[k].second, r.faces += shells[k].first.size();
         r.solids = kept.size();
-        // Tolerant edges: merged faces, and edges on curved caps (fitted
-        // curves on a cylinder or torus, within tol / 4).
-        const double uncertainty = r.merged || lat.shape.bent() ? tol : 1e-7;
-        if (kept.empty()) r.error = "nothing to export";
-        else if (!writeStepFile(path, name, [&](StepFile& st) { return b.write(st, kept); }, uncertainty))
-            r.error = "cannot write '" + path + "'";
+        // Tolerant edges: merged faces, edges on curved caps (fitted curves
+        // on a cylinder or torus, within tol / 4), and the edges of the
+        // channel buffers' hole walls (fitted to their runs within tol / 4).
+        const bool fitted = lat.shape.bent() || lat.shape.trimmed() || lat.shape.channelAxis[0] >= 0;
+        const double uncertainty = r.merged || fitted ? tol : 1e-7;
+        if (kept.empty()) return r.error = "nothing to export", r;
+        // A sheet's fluid: channel A and channel B in a file each, for CFD
+        // setups that take one fluid region per file.
+        std::vector<std::vector<std::vector<std::vector<int>>>> groups{kept};
+        std::vector<std::string> suffixes{""};
+        if (splitChannels) {
+            std::vector<std::vector<std::vector<int>>> channel[2];
+            bool both = false;
+            for (const auto& solid : kept) {
+                const int walls = b.shellWalls(solid[0]);
+                if (walls == 1 || walls == 2) channel[walls - 1].push_back(solid);
+                else both = true;
+            }
+            if (both) r.note = "a fluid solid lies in both channels (they meet in a buffer), so they stay in one file";
+            else if (channel[0].empty() || channel[1].empty()) r.note = "only one fluid channel is left";
+            else groups = {channel[0], channel[1]}, suffixes = {"_A", "_B"};
+        }
+        for (size_t g = 0; g < groups.size(); ++g) {
+            const std::string file = withSuffix(path, suffixes[g]);
+            if (!writeStepFile(file, name + suffixes[g], [&](StepFile& st) { return b.write(st, groups[g]); }, uncertainty))
+                return r.error = "cannot write '" + file + "'", r;
+            r.files.push_back(file);
+        }
         return r;
     }
     return r;

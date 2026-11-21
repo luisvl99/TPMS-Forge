@@ -129,7 +129,9 @@ for path in args:
     print(f"{os.path.basename(path)}: solids={len(solids)} shells={len(shells)} closed_shells={closed} "
           f"faces={faces} valid={valid} volume={vol:.4f} mm3 read={t_read:.1f}s check={t_check:.1f}s")
     if "--periodic" in sys.argv:
-        print("  periodic:", periodic(shape))
+        result = periodic(shape)
+        failed += "DIFFER" in result
+        print("  periodic:", result)
     if "--names" in sys.argv:
         print("  names:", names(path))
 sys.exit(1 if failed else 0)  # usable in CI

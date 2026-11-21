@@ -4,11 +4,18 @@
 
 #include <charconv>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
 
 namespace tpms {
+
+// A path with a suffix before its extension: ("a/b.step", "_A") -> "a/b_A.step".
+inline std::string withSuffix(const std::string& path, const std::string& suffix) {
+    std::filesystem::path p(path);
+    return p.replace_filename(p.stem().string() + suffix + p.extension().string()).string();
+}
 
 // Binary STL with all parts.
 bool writeStl(const std::string& path, const std::vector<Mesh>& parts);
@@ -30,6 +37,8 @@ struct SmoothReport {
     int patches = 0;      // patch grid steps per unit cell edge that was used
     int samples = 0;      // samples per patch edge
     std::string error;    // empty on success
+    std::vector<std::string> files;  // written: the path, or its _A and _B files (splitChannels)
+    std::string note;                // why the channels stayed in one file
 };
 
 // Smooth STEP AP214 of a box, tube or torus shell: bicubic B-spline faces,
@@ -38,10 +47,12 @@ struct SmoothReport {
 // until the fit error is below `tol` (mm). Then merges the patches into large
 // trimmed faces with edges within `tol`, unless `exact`. `fieldVolume` (mm^3,
 // from samples of the field) checks the result against folded patches; it
-// must match within 2% of `shapeVolume`.
+// must match within 2% of `shapeVolume`. With `splitChannels` (a sheet's
+// fluid), the solids of channel A (f > c) and B (f < -c) go to two files,
+// path with _A and _B, when every solid lies in one channel.
 SmoothReport writeSmoothStep(const std::string& path, const std::string& name, const Lattice& lat,
                              const int cells[3], int patches, double tol, double minFragment, bool exact,
-                             double fieldVolume, double shapeVolume);
+                             double fieldVolume, double shapeVolume, bool splitChannels = false);
 
 // Minimal ISO 10303-21 writer shared by both STEP writers.
 class StepFile {

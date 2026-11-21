@@ -55,6 +55,11 @@ struct Settings {
     bool slabs = false;         // box: plates (solid) or buffers (void) across `slabAxis`
     int slabAxis = 2;
     float slab[2] = {1, 1};     // at the start and the end of that axis, mm
+    bool channelBuffers = false;   // box, sheet: inlets and outlets per fluid channel
+    int channelAxis[2] = {0, 1};   // flow axis of channel A and of channel B
+    float buffer = 10, header = 1;  // buffer length and header plate thickness, mm
+    float material[2] = {0, 0};          // report: solid density kg/m^3, Young's modulus GPa (0: none)
+    float flow[3] = {0, 0.001f, 998};    // report: velocity m/s (0: none), viscosity Pa s, density kg/m^3
     float shift[3] = {0, 0, 0};  // offset of the lattice, in cells
     int shape = kBox;
     bool cubic = true;
@@ -113,6 +118,9 @@ std::vector<std::string> geometryArgs(const Settings& s) {
     if (s.shape == kBox && s.unitCell) a.push_back("--unit-cell");
     if (s.shape == kBox && s.slabs)
         a.insert(a.end(), {s.part ? "--buffers" : "--plates", axes[s.slabAxis], num(s.slab[0]), num(s.slab[1])});
+    if (s.shape == kBox && s.channelBuffers && s.form == 0)
+        a.insert(a.end(), {"--channel-buffers", axes[s.channelAxis[0]], axes[s.channelAxis[1]], num(s.buffer),
+                           num(s.header)});
     if (s.shift[0] || s.shift[1] || s.shift[2]) {
         a.push_back("--shift");
         const bool same = s.shift[0] == s.shift[1] && s.shift[1] == s.shift[2];
@@ -148,25 +156,38 @@ std::vector<std::string> exportArgs(const Settings& s) {
     return a;
 }
 
+// The property report's command: geometry, mesh steps, and its inputs.
+std::vector<std::string> reportArgs(const Settings& s) {
+    std::vector<std::string> a = geometryArgs(s);
+    if (s.res != 24) a.insert(a.end(), {"--res", std::to_string(s.res)});
+    if (s.material[0] > 0) a.insert(a.end(), {"--material", num(s.material[0]), num(s.material[1])});
+    if (s.flow[0] > 0) a.insert(a.end(), {"--flow", num(s.flow[0]), num(s.flow[1]), num(s.flow[2])});
+    return a;
+}
+
 std::string commandLine(const std::vector<std::string>& args) {
     std::string c = "tpms";
     for (const auto& a : args) c += a.find(' ') == std::string::npos ? " " + a : " \"" + a + "\"";
     return c;
 }
 
-bool saveDialog(char* path, size_t size, bool json = false) {
+// A save dialog for a model ("step"), or a report ("json", "csv").
+bool saveDialog(char* path, size_t size, const char* kind = "step") {
 #ifdef _WIN32
+    const std::string k = kind;
     OPENFILENAMEA ofn{};
     ofn.lStructSize = sizeof ofn;
-    ofn.lpstrFilter = json ? "JSON (*.json)\0*.json\0" : "STEP (*.step)\0*.step;*.stp\0STL (*.stl)\0*.stl\0";
-    ofn.nFilterIndex = !json && isStl(path) ? 2 : 1;
+    ofn.lpstrFilter = k == "json"  ? "JSON (*.json)\0*.json\0"
+                      : k == "csv" ? "CSV (*.csv)\0*.csv\0"
+                                   : "STEP (*.step)\0*.step;*.stp\0STL (*.stl)\0*.stl\0";
+    ofn.nFilterIndex = k == "step" && isStl(path) ? 2 : 1;
     ofn.lpstrFile = path;
     ofn.nMaxFile = DWORD(size);
-    ofn.lpstrDefExt = json ? "json" : "step";
+    ofn.lpstrDefExt = kind;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
     return GetSaveFileNameA(&ofn);
 #else
-    (void)path, (void)size, (void)json;
+    (void)path, (void)size, (void)kind;
     return false;
 #endif
 }
@@ -278,7 +299,10 @@ Preview buildPreview(const std::vector<std::string>& args) {
     // A sheet's two walls can be closer than a grid step, but each wall alone
     // is smooth, so the preview has no holes at any thickness. Normals are the
     // gradient of the exported field: smooth, and pointing out of the solid.
-    const std::vector<double> sides = lat.form == Form::Sheet ? std::vector<double>{1, -1} : std::vector<double>{1};
+    const bool headers = shape.channelAxis[0] >= 0;  // channel buffers: shown from the part's mesh, below
+    const std::vector<double> sides = headers                    ? std::vector<double>{}
+                                      : lat.form == Form::Sheet ? std::vector<double>{1, -1}
+                                                                : std::vector<double>{1};
     for (double side : sides) {
         if (!solid) color = channels && side < 0 ? kRed : kBlue;  // the wall f = side c bounds the channel beyond it
         const Mesh m = meshField(
@@ -305,7 +329,31 @@ Preview buildPreview(const std::vector<std::string>& args) {
         }
     }
 
-    if (shape.trimmed()) {
+    if (headers) {
+        // Channel buffers: the plates' holes and the buffers come from the
+        // part's closed mesh, as STL export makes it; a fluid face takes the
+        // color of the channel just behind it (channel A in the box where
+        // f > 0, and beyond the faces across its axis).
+        const Mesh m = meshSolid(o, lat, res);
+        const Grid box = gridOf(o, 1);
+        std::vector<Vec3> vn(m.vertices.size());  // smooth shading: area-weighted vertex normals
+        for (const auto& t : m.triangles) {
+            const Vec3 n = cross(m.vertices[t[1]] - m.vertices[t[0]], m.vertices[t[2]] - m.vertices[t[0]]);
+            for (uint32_t v : t) vn[v] = vn[v] + n;
+        }
+        for (const auto& t : m.triangles) {
+            const Vec3 a = m.vertices[t[0]], b = m.vertices[t[1]], c = m.vertices[t[2]];
+            const Vec3 n = cross(b - a, c - a);
+            if (!solid) {
+                const Vec3 q = (a + b + c) * (1.0 / 3) - n * (0.25 * h / std::max(norm(n), 1e-30));
+                int K = open.value(q.x, q.y, q.z) > 0 ? 0 : 1;
+                for (int k = 0; k < 3; ++k)
+                    if (q[k] < 0 || q[k] > box.size[k]) K = shape.headerChannel(2 * k + int(q[k] > 0));
+                color = K ? kRed : kBlue;
+            }
+            emitMm(a, vn[t[0]]), emitMm(b, vn[t[1]]), emitMm(c, vn[t[2]]);
+        }
+    } else if (shape.trimmed()) {
         // Cut faces on the shape: its surface, cut to the lattice region.
         // Each triangle is split 4 x 4 first, as thin sheets give thin bands.
         const Mesh surf = meshField(shapeField, grid);
@@ -542,6 +590,13 @@ Settings fromOptions(const Options& o) {
     s.unitCell = o.unitCell;
     s.slabs = o.plates || o.buffers;
     if (s.slabs) s.slabAxis = o.shape.slabAxis, s.slab[0] = float(o.shape.slab[0]), s.slab[1] = float(o.shape.slab[1]);
+    s.channelBuffers = o.shape.channelAxis[0] >= 0;
+    if (s.channelBuffers) {
+        s.channelAxis[0] = o.shape.channelAxis[0], s.channelAxis[1] = o.shape.channelAxis[1];
+        s.buffer = float(o.shape.buffer), s.header = float(o.shape.header);
+    }
+    for (int k = 0; k < 2; ++k) s.material[k] = float(o.material[k]);
+    for (int k = 0; k < 3; ++k) s.flow[k] = float(o.flow[k]);
     if (o.unitCell) s.exact = false, s.minFragment = 0.01f;  // implied by the unit cell, not chosen
     for (int a = 0; a < 3; ++a) s.shift[a] = float(o.shift[a]);
     for (int a = 0; a < 3; ++a) s.cell[a] = float(o.cell[a]), s.cells[a] = o.cells[a];
@@ -641,9 +696,7 @@ int main(int argc, char** argv) {
         }
         if (startOptions.report) {  // `tpms-gui ... --report` opens with the report
             startOptions.report = false;
-            std::vector<std::string> job = geometry;
-            if (s.res != 24) job.insert(job.end(), {"--res", std::to_string(s.res)});
-            reportJob = std::async(std::launch::async, buildReport, job);
+            reportJob = std::async(std::launch::async, buildReport, reportArgs(s));
         }
         if (reportJob.valid() && reportJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             report = reportJob.get();
@@ -716,8 +769,10 @@ int main(int argc, char** argv) {
                 ImGui::InputFloat3("Cell size (mm)", s.cell, "%.2f");
             }
             if (s.shape == kBox) {
-                // Unit cell, graded cell size and plates / buffers exclude each other.
-                ImGui::BeginDisabled(s.cellGraded || s.slabs);
+                // Unit cell, graded cell size, plates / buffers and channel
+                // buffers exclude each other.
+                const bool channels = s.channelBuffers && s.form == 0;
+                ImGui::BeginDisabled(s.cellGraded || s.slabs || channels);
                 if (ImGui::Checkbox("Unit cell (periodic)", &s.unitCell) && s.unitCell)
                     s.cells[0] = s.cells[1] = s.cells[2] = 1;
                 ImGui::EndDisabled();
@@ -725,7 +780,7 @@ int main(int argc, char** argv) {
                     ImGui::SetTooltip("A periodic cell for FEA homogenization: opposite faces match exactly,\n"
                                       "edges are exact and every piece is kept. More cells give a supercell.");
                 ImGui::InputInt3("Cells x y z", s.cells);
-                ImGui::BeginDisabled(s.unitCell || s.slabs);
+                ImGui::BeginDisabled(s.unitCell || s.slabs || channels);
                 ImGui::Checkbox("Graded cell size", &s.cellGraded);
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered())
@@ -736,7 +791,7 @@ int main(int argc, char** argv) {
                     ImGui::InputFloat("Cell size at end (mm)", &s.cellEnd, 1, 5, "%.2f");
                     s.cellEnd = std::max(0.1f, s.cellEnd);
                 }
-                ImGui::BeginDisabled(s.unitCell || s.cellGraded);
+                ImGui::BeginDisabled(s.unitCell || s.cellGraded || channels);
                 ImGui::Checkbox(s.part ? "Buffers (inlet / outlet)" : "Plates", &s.slabs);
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered())
@@ -749,6 +804,22 @@ int main(int argc, char** argv) {
                     ImGui::InputFloat2(s.part ? "Length start / end (mm)" : "Thickness start / end (mm)", s.slab, "%.2f");
                     s.slab[0] = std::max(0.0f, s.slab[0]), s.slab[1] = std::max(0.0f, s.slab[1]);
                     if (s.slab[0] + s.slab[1] <= 0) s.slab[1] = 1;
+                }
+                ImGui::BeginDisabled(s.unitCell || s.cellGraded || s.slabs || s.form != 0);
+                ImGui::Checkbox("Channel buffers (heat exchanger)", &s.channelBuffers);
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Sheet only. Separate inlets and outlets for the two fluid channels (cross flow):\n"
+                                      "each channel gets buffers on the two faces across its own axis, behind header\n"
+                                      "plates with holes where it opens. The plates close the other channel there.\n"
+                                      "Void: one STEP file per channel. Solid: the lattice with the plates.");
+                if (channels) {
+                    ImGui::Combo("Channel A (blue) along", &s.channelAxis[0], "x\0y\0z\0");
+                    ImGui::Combo("Channel B (red) along", &s.channelAxis[1], "x\0y\0z\0");
+                    if (s.channelAxis[1] == s.channelAxis[0]) s.channelAxis[1] = (s.channelAxis[0] + 1) % 3;
+                    ImGui::InputFloat("Buffer length (mm)", &s.buffer, 1, 5, "%.2f");
+                    ImGui::InputFloat("Plate thickness (mm)", &s.header, 0.1f, 1, "%.2f");
+                    s.buffer = std::max(0.1f, s.buffer), s.header = std::max(0.05f, s.header);
                 }
             }
         }
@@ -779,7 +850,6 @@ int main(int argc, char** argv) {
             ImGui::SetTooltip("Drop pieces smaller than this fraction of the largest piece (cut off by the shape).");
 
         ImGui::SeparatorText("Export");
-        const bool trimmed = s.shape == kCylinder || s.shape == kSphere || s.shape == kTorus;
         ImGui::InputText("##file", s.out, sizeof s.out);
 #ifdef _WIN32
         ImGui::SameLine();
@@ -791,11 +861,6 @@ int main(int argc, char** argv) {
             ImGui::Checkbox("Faceted (one face per triangle)", &s.faceted);
             if (s.faceted) {
                 ImGui::InputInt("Mesh steps per cell", &s.res);
-            } else if (trimmed) {
-                ImGui::PushTextWrapPos(0);
-                ImGui::TextColored({1, 0.6f, 0.4f, 1}, "Smooth STEP works for the box, tube and torus shell only: "
-                                                       "tick Faceted or export .stl.");
-                ImGui::PopTextWrapPos();
             } else {
                 ImGui::InputInt("Start patches per cell", &s.patches);
                 ImGui::InputFloat("Tolerance (mm)", &s.tol, 0, 0, s.tol > 0 ? "%.4f" : "%.0f (auto)");
@@ -810,7 +875,6 @@ int main(int argc, char** argv) {
 
         const std::vector<std::string> args = exportArgs(s);
         const bool exporting = exportJob.valid();
-        const bool unsupported = trimmed && !isStl(s.out) && !s.faceted;
         // Export and the property report run the same way: a tpms command
         // on a worker thread, with its output in the log.
         auto start = [&](const std::vector<std::string>& job) {
@@ -828,20 +892,31 @@ int main(int argc, char** argv) {
             });
         };
         const bool reporting = reportJob.valid();
-        ImGui::BeginDisabled(exporting || reporting || !shown.error.empty() || unsupported);
+        ImGui::BeginDisabled(exporting || reporting || !shown.error.empty());
         if (ImGui::Button(exporting ? "Working..." : "Export", {-1, 0})) start(args);
         ImGui::EndDisabled();
         ImGui::BeginDisabled(exporting || reporting || !shown.error.empty());
         if (ImGui::Button(reporting ? "Computing..." : "Property report", {-1, 0})) {
-            std::vector<std::string> job = geometryArgs(s);
-            if (s.res != 24) job.insert(job.end(), {"--res", std::to_string(s.res)});
             exportStart = std::chrono::steady_clock::now();
-            reportJob = std::async(std::launch::async, buildReport, job);
+            reportJob = std::async(std::launch::async, buildReport, reportArgs(s));
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Solid and fluid volumes, wetted area, hydraulic diameters, wall thickness and\n"
-                              "which faces each piece connects, from meshes at %d steps per cell.", s.res);
+            ImGui::SetTooltip("Solid and fluid volumes, wetted area, hydraulic diameters, wall thickness,\n"
+                              "permeability, stiffness bounds and which faces each piece connects, from\n"
+                              "meshes at %d steps per cell.", s.res);
         ImGui::EndDisabled();
+        if (ImGui::TreeNode("Report inputs (optional)")) {
+            ImGui::InputFloat("Solid density (kg/m3)", &s.material[0], 100, 1000, s.material[0] > 0 ? "%.0f" : "none");
+            ImGui::InputFloat("Young's modulus (GPa)", &s.material[1], 1, 10, s.material[1] > 0 ? "%.1f" : "none");
+            ImGui::InputFloat("Flow velocity (m/s)", &s.flow[0], 0.01f, 0.1f, s.flow[0] > 0 ? "%.3f" : "none");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Superficial (inlet) velocity: adds Reynolds numbers and pressure drop estimates.");
+            ImGui::InputFloat("Viscosity (Pa s)", &s.flow[1], 0.0001f, 0.001f, "%.5f");
+            ImGui::InputFloat("Fluid density (kg/m3)", &s.flow[2], 10, 100, "%.1f");
+            for (float* v : {&s.material[0], &s.material[1], &s.flow[0]}) *v = std::max(0.0f, *v);
+            s.flow[1] = std::max(1e-6f, s.flow[1]), s.flow[2] = std::max(1e-3f, s.flow[2]);
+            ImGui::TreePop();
+        }
         if (exporting || reporting)
             ImGui::Text("Working... %.0f s",
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - exportStart).count());
@@ -895,11 +970,18 @@ int main(int argc, char** argv) {
                         for (const auto& [label, value] : report.rows) text += label + "\t" + value + "\n";
                         ImGui::SetClipboardText(text.c_str());
                     }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Save JSON...") && saveDialog(reportPath, sizeof reportPath, true))
-                        status = writeReportJson(reportPath, report.report, report.options, report.lattice)
-                                     ? std::string("Done: wrote ") + reportPath
-                                     : std::string("Failed: cannot write ") + reportPath;
+                    for (const char* kind : {"json", "csv"}) {
+                        ImGui::SameLine();
+                        const std::string label = std::string(kind) == "json" ? "Save JSON..." : "Save CSV...";
+                        if (!ImGui::Button(label.c_str())) continue;
+                        std::snprintf(reportPath, sizeof reportPath, "%s",
+                                      std::filesystem::path(reportPath).replace_extension(kind).string().c_str());
+                        if (!saveDialog(reportPath, sizeof reportPath, kind)) continue;
+                        const bool wroteIt = std::string(kind) == "json"
+                                                 ? writeReportJson(reportPath, report.report, report.options, report.lattice)
+                                                 : writeReportCsv(reportPath, report.report, report.options, report.lattice);
+                        status = (wroteIt ? std::string("Done: wrote ") : std::string("Failed: cannot write ")) + reportPath;
+                    }
                 }
             }
             ImGui::End();

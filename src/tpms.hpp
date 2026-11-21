@@ -129,8 +129,18 @@ struct Shape {
     double cellEnd = 0;                 // box: the cell length at the far end of that axis
     int slabAxis = -1;                  // box: plates or buffers on the faces across this axis
     double slab[2] = {0, 0};            // their thickness at the start and the end of it, mm
+    // Box, sheet: channel buffers (cross flow). Each fluid channel, A (f > c)
+    // and B (f < -c), has an inlet and an outlet buffer on the two faces
+    // across its own axis, behind a header plate with holes where that
+    // channel opens: the plate closes the other channel there.
+    int channelAxis[2] = {-1, -1};  // axis of channel A and of channel B, -1: none
+    double header = 0, buffer = 0;  // plate thickness and buffer length, mm
+    Vec3 frame[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};  // sphere: axes of map(), poles along frame[2]
 
     bool bent() const { return kind == ShapeKind::Tube || kind == ShapeKind::TorusShell; }
+
+    // The fluid channel whose buffer lies on box face F (0: A, 1: B), or -1.
+    int headerChannel(int F) const { return F / 2 == channelAxis[0] ? 0 : F / 2 == channelAxis[1] ? 1 : -1; }
 
     // Name of face F = 2 * axis + side of the (parameter) box, where a cut
     // face lies: x-, x+, ... for the box; inner, outer, bottom, top for the
@@ -138,6 +148,9 @@ struct Shape {
     const char* faceName(int F) const {
         static const char* const box[6] = {"x-", "x+", "y-", "y+", "z-", "z+"};
         static const char* const bentNames[6] = {"inner", "outer", "", "", "bottom", "top"};
+        static const char* const cylinder[6] = {"", "side", "", "", "bottom", "top"};
+        if (kind == ShapeKind::Cylinder) return cylinder[F];
+        if (trimmed()) return F == 1 ? "surface" : "";
         if (kind == ShapeKind::TorusShell && F >= 4) return "";
         return bent() ? bentNames[F] : box[F];
     }
@@ -145,8 +158,18 @@ struct Shape {
     bool trimmed() const {
         return kind == ShapeKind::Cylinder || kind == ShapeKind::Sphere || kind == ShapeKind::Torus;
     }
-    int periodic() const {  // bit per parameter axis that wraps around
-        return kind == ShapeKind::Tube ? 2 : kind == ShapeKind::TorusShell ? 6 : 0;
+    // Bit per parameter axis that wraps around. Trimmed shapes: of the
+    // parameter box of their smooth B-rep (see map()).
+    int periodic() const {
+        return kind == ShapeKind::Tube || kind == ShapeKind::Cylinder || kind == ShapeKind::Sphere ? 2
+               : kind == ShapeKind::TorusShell || kind == ShapeKind::Torus                        ? 6
+                                                                                                  : 0;
+    }
+    // Trimmed: face F of the parameter box maps to a line or a point (the
+    // axis, the center line of a torus, the center or a pole of a sphere).
+    bool pole(int F) const {
+        if (kind == ShapeKind::Sphere) return F == 0 || F >= 4;
+        return (kind == ShapeKind::Cylinder || kind == ShapeKind::Torus) && F == 0;
     }
 
     // Box: position in mm along axis a at parameter u (cell units), and the
@@ -166,8 +189,23 @@ struct Shape {
     }
 
     // Mapped: parameter point (cell units) to mm. Orientation preserving.
+    // Trimmed: the parameter box of the smooth B-rep, from the axis, center
+    // line or center: cylindrical (radius, angle, z), toroidal (radius from
+    // the center line, angle around the ring, angle around the tube) or
+    // spherical (radius, longitude, angle from the south pole) coordinates.
+    // `cells` steps along each; the straight lattice is evaluated at map(p).
     Vec3 map(Vec3 p) const {
         if (kind == ShapeKind::Box) return {boxPos(0, p.x), boxPos(1, p.y), boxPos(2, p.z)};
+        if (trimmed()) {
+            const double r = r1 * p.x / cells[0], a = kTwoPi * p.y / cells[1], ca = std::cos(a), sa = std::sin(a);
+            if (kind == ShapeKind::Cylinder) return {r * ca, r * sa, height * (p.z / cells[2] - 0.5)};
+            if (kind == ShapeKind::Sphere) {
+                const double t = 0.5 * kTwoPi * p.z / cells[2], s = r * std::sin(t);
+                return frame[0] * (s * ca) + frame[1] * (s * sa) + frame[2] * (-r * std::cos(t));
+            }
+            const double b = kTwoPi * p.z / cells[2], d = major + r * std::cos(b);
+            return {d * ca, d * sa, r * std::sin(b)};
+        }
         const double r = radius(p.x), a = kTwoPi * p.y / cells[1];
         if (kind == ShapeKind::Tube) return {r * std::cos(a), r * std::sin(a), height * (p.z / cells[2] - 0.5)};
         const double b = kTwoPi * p.z / cells[2], d = major + r * std::cos(b);
@@ -206,7 +244,14 @@ struct Shape {
     // the parameter box is the part in mm, Phi = p.x.
     double flux(Vec3 p) const {
         if (kind == ShapeKind::Box) return mapped() ? boxPos(0, p.x) * boxCell(1, p.y) * boxCell(2, p.z) : p.x;
-        const double pi = 0.5 * kTwoPi, r = radius(p.x);
+        const double pi = 0.5 * kTwoPi;
+        if (trimmed()) {  // as the tube and torus shell with r0 = 0, and the sphere's r^3 / 3 sin t
+            const double r = r1 * p.x / cells[0], k = pi / (cells[1] * cells[2]);
+            if (kind == ShapeKind::Cylinder) return k * height * r * r;
+            if (kind == ShapeKind::Sphere) return k * pi * std::sin(pi * p.z / cells[2]) * r * r * r * (2.0 / 3);
+            return 4 * k * pi * (major * r * r / 2 + std::cos(kTwoPi * p.z / cells[2]) * r * r * r / 3);
+        }
+        const double r = radius(p.x);
         if (kind == ShapeKind::Tube) return pi * height / (cells[1] * cells[2]) * (r * r - r0 * r0);
         const double b = kTwoPi * p.z / cells[2];
         return 4 * pi * pi / (cells[1] * cells[2]) *

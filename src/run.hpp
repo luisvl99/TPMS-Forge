@@ -37,6 +37,11 @@ struct Options {
     bool unitCell = false;  // box: a periodic cell (exact edges, every piece kept)
     bool plates = false, buffers = false;  // box: slabs (shape.slab) on a solid, or on the fluid
     double shift[3] = {0, 0, 0};  // offset of the lattice, in cells
+    // Report inputs. material: solid density kg/m^3 and Young's modulus GPa
+    // (0: not given). flow: superficial velocity m/s (0: not given), fluid
+    // viscosity Pa s and density kg/m^3 (water by default).
+    double material[2] = {0, 0};
+    double flow[3] = {0, 1e-3, 998};
 };
 
 // The --shape name of a shape kind.
@@ -56,14 +61,17 @@ Lattice makeLattice(const Options& o);
 // step of margin.
 Grid gridOf(const Options& o, int res);
 
-// The grid of gridOf, with whole steps added for plates or buffers.
+// The grid of gridOf, with whole steps added for plates or buffers, or for
+// channel buffers and their plates.
 Grid meshGrid(const Options& o, int res);
 
-// Volume of the plates or buffers, mm^3.
-double slabVolume(const Options& o);
+// Volume of the part outside the lattice box, mm^3: plates or buffers, or
+// channel buffers with their header plates (the holes in those from the
+// field).
+double slabVolume(const Options& o, const Lattice& lat);
 
 // Closed mesh of the exported region in mm (mapped shapes mapped to mm),
-// with plates or buffers.
+// with plates or buffers, or channel buffers.
 Mesh meshSolid(const Options& o, const Lattice& lat, int res, size_t* droppedDegenerate = nullptr);
 
 // Volume of the part's shape, mm^3.
@@ -98,6 +106,9 @@ Report makeReport(const Options& o, const Lattice& lat, int res);
 std::vector<std::pair<std::string, std::string>> reportRows(const Report& r, const Options& o);
 void printReport(const Report& r, const Options& o, const Print& print);
 bool writeReportJson(const std::string& path, const Report& r, const Options& o, const Lattice& lat);
+// One header line of value names (with units) and one line of values, for
+// spreadsheets and parameter sweeps.
+bool writeReportCsv(const std::string& path, const Report& r, const Options& o, const Lattice& lat);
 
 // The exported pieces of a closed mesh: without cavities and fragments
 // smaller than minFragment x the largest piece.
