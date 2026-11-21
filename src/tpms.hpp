@@ -106,20 +106,23 @@ inline double norm(Vec3 a) { return std::sqrt(dot(a, a)); }
 
 // The outer shape of the part.
 // - Box: the lattice fills [0, cells x cell].
-// - Tube, torus shell: the lattice is built in a parameter box, one unit per
-//   cell, and bent into the shape, so cells follow the curvature. Parameter
-//   axes: tube = radial, around, along the axis; torus shell = radial,
-//   around the ring, around the tube.
+// - Tube, torus shell, sphere shell: the lattice is built in a parameter
+//   box, one unit per cell, and bent into the shape, so cells follow the
+//   curvature. Parameter axes: tube = radial, around, along the axis; torus
+//   shell = radial, around the ring, around the tube; sphere shell = radial,
+//   around (longitude), from south to north. A sphere shell stops short of
+//   the poles: cells that follow it cannot reach them (the lattice would
+//   differ at one point for each longitude).
 // - Box with a graded cell size: also built in a parameter box, and
 //   stretched along one axis, where the cell length changes linearly.
 // - Cylinder, sphere, torus (trimmed): a straight lattice cut by the shape.
 // "Mapped" shapes are the ones built in a parameter box.
 // Round shapes are centered at the origin, axis along z.
-enum class ShapeKind { Box, Tube, TorusShell, Cylinder, Sphere, Torus };
+enum class ShapeKind { Box, Tube, TorusShell, Cylinder, Sphere, Torus, SphereShell };
 
 struct Shape {
     ShapeKind kind = ShapeKind::Box;
-    double r0 = 0, r1 = 0;        // tube, torus shell: inner and outer radius; trimmed: r1 = (tube) radius
+    double r0 = 0, r1 = 0;        // tube, torus/sphere shell: inner and outer radius; trimmed: r1 = (tube) radius
     double height = 0;            // tube, cylinder
     double major = 0;             // torus shell, torus: from the axis to the tube center
     bool logRadial = true;        // tube, torus shell: r = r0 (r1 / r0)^t keeps cells square; false: linear in r
@@ -136,15 +139,21 @@ struct Shape {
     int channelAxis[2] = {-1, -1};  // axis of channel A and of channel B, -1: none
     double header = 0, buffer = 0;  // plate thickness and buffer length, mm
     Vec3 frame[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};  // sphere: axes of map(), poles along frame[2]
+    double polar[2] = {0, 0};  // sphere shell: angles from the south pole (-z) where it starts and ends, radians
 
-    bool bent() const { return kind == ShapeKind::Tube || kind == ShapeKind::TorusShell; }
+    bool bent() const {
+        return kind == ShapeKind::Tube || kind == ShapeKind::TorusShell || kind == ShapeKind::SphereShell;
+    }
+    // Sphere shell: the angle from the south pole at parameter w (cells).
+    double polarAngle(double w) const { return polar[0] + (polar[1] - polar[0]) * w / cells[2]; }
 
     // The fluid channel whose buffer lies on box face F (0: A, 1: B), or -1.
     int headerChannel(int F) const { return F / 2 == channelAxis[0] ? 0 : F / 2 == channelAxis[1] ? 1 : -1; }
 
     // Name of face F = 2 * axis + side of the (parameter) box, where a cut
     // face lies: x-, x+, ... for the box; inner, outer, bottom, top for the
-    // tube and torus shell ("" for the faces where they wrap around).
+    // tube and torus and sphere shell ("" for the faces where they wrap
+    // around).
     const char* faceName(int F) const {
         static const char* const box[6] = {"x-", "x+", "y-", "y+", "z-", "z+"};
         static const char* const bentNames[6] = {"inner", "outer", "", "", "bottom", "top"};
@@ -161,7 +170,9 @@ struct Shape {
     // Bit per parameter axis that wraps around. Trimmed shapes: of the
     // parameter box of their smooth B-rep (see map()).
     int periodic() const {
-        return kind == ShapeKind::Tube || kind == ShapeKind::Cylinder || kind == ShapeKind::Sphere ? 2
+        return kind == ShapeKind::Tube || kind == ShapeKind::Cylinder || kind == ShapeKind::Sphere ||
+                       kind == ShapeKind::SphereShell
+                   ? 2
                : kind == ShapeKind::TorusShell || kind == ShapeKind::Torus                        ? 6
                                                                                                   : 0;
     }
@@ -208,6 +219,10 @@ struct Shape {
         }
         const double r = radius(p.x), a = kTwoPi * p.y / cells[1];
         if (kind == ShapeKind::Tube) return {r * std::cos(a), r * std::sin(a), height * (p.z / cells[2] - 0.5)};
+        if (kind == ShapeKind::SphereShell) {
+            const double t = polarAngle(p.z), s = r * std::sin(t);
+            return {s * std::cos(a), s * std::sin(a), -r * std::cos(t)};
+        }
         const double b = kTwoPi * p.z / cells[2], d = major + r * std::cos(b);
         return {d * std::cos(a), d * std::sin(a), r * std::sin(b)};
     }
@@ -229,6 +244,9 @@ struct Shape {
         if (kind == ShapeKind::Tube) {
             r = std::hypot(q.x, q.y);
             p.z = (q.z / height + 0.5) * cells[2];
+        } else if (kind == ShapeKind::SphereShell) {
+            r = norm(q);
+            p.z = (std::acos(std::clamp(-q.z / r, -1.0, 1.0)) - polar[0]) / (polar[1] - polar[0]) * cells[2];
         } else {
             const double d = std::hypot(q.x, q.y) - major;
             r = std::hypot(d, q.z);
@@ -253,6 +271,9 @@ struct Shape {
         }
         const double r = radius(p.x);
         if (kind == ShapeKind::Tube) return pi * height / (cells[1] * cells[2]) * (r * r - r0 * r0);
+        if (kind == ShapeKind::SphereShell)
+            return kTwoPi / cells[1] * (polar[1] - polar[0]) / cells[2] * std::sin(polarAngle(p.z)) *
+                   (r * r * r - r0 * r0 * r0) / 3;
         const double b = kTwoPi * p.z / cells[2];
         return 4 * pi * pi / (cells[1] * cells[2]) *
                (major * (r * r - r0 * r0) / 2 + std::cos(b) * (r * r * r - r0 * r0 * r0) / 3);
@@ -276,6 +297,9 @@ struct Shape {
         }
         const double radial = radius(1) - r0;
         if (kind == ShapeKind::Tube) return std::min({radial, kTwoPi * r0 / cells[1], height / cells[2]});
+        if (kind == ShapeKind::SphereShell)  // around: narrowest at the end nearest a pole
+            return std::min({radial, kTwoPi * r0 * std::min(std::sin(polar[0]), std::sin(polar[1])) / cells[1],
+                             r0 * (polar[1] - polar[0]) / cells[2]});
         return std::min({radial, kTwoPi * (major - r1) / cells[1], kTwoPi * r0 / cells[2]});
     }
 
@@ -292,6 +316,13 @@ struct Shape {
             J[0] = Vec3{ca, sa, 0} * dr;
             J[1] = Vec3{-sa, ca, 0} * (r * da);
             J[2] = {0, 0, height / cells[2]};
+            return;
+        }
+        if (kind == ShapeKind::SphereShell) {
+            const double t = polarAngle(p.z), st = std::sin(t), ct = std::cos(t);
+            J[0] = Vec3{st * ca, st * sa, -ct} * dr;
+            J[1] = Vec3{-sa, ca, 0} * (r * st * da);
+            J[2] = Vec3{ct * ca, ct * sa, st} * (r * (polar[1] - polar[0]) / cells[2]);
             return;
         }
         const double b = kTwoPi * p.z / cells[2], cb = std::cos(b), sb = std::sin(b);
@@ -332,6 +363,8 @@ struct Shape {
         case ShapeKind::Cylinder: return pi * r1 * r1 * height;
         case ShapeKind::Sphere: return 4.0 / 3.0 * pi * r1 * r1 * r1;
         case ShapeKind::Torus: return 2 * pi * pi * major * r1 * r1;
+        case ShapeKind::SphereShell:
+            return kTwoPi / 3 * (r1 * r1 * r1 - r0 * r0 * r0) * (std::cos(polar[0]) - std::cos(polar[1]));
         default: return 0;
         }
     }
@@ -350,11 +383,14 @@ struct Lattice {
     int grade = -1;
     double gradeFrom = 0, gradeTo = 1;
     std::vector<double> levels;
+    // Sheet of a set wall thickness: value() is f / |grad f| in mm, about the
+    // distance to the surface f = 0, and the level is half the wall.
+    bool wall = false;
 
-    // Surface function f at a point. The phase (in cells) is reduced to one
-    // cell, and points within 1e-12 of a cell boundary are put on it, so a
-    // point and its copy one cell over give the same value bit for bit:
-    // opposite faces of a cell match exactly.
+    // Surface function f at a point (or f / |grad f|, see `wall`). The phase
+    // (in cells) is reduced to one cell, and points within 1e-12 of a cell
+    // boundary are put on it, so a point and its copy one cell over give the
+    // same value bit for bit: opposite faces of a cell match exactly.
     double value(double x, double y, double z) const {
         auto phase = [](double u, double offset) {
             const double k = std::round(u);
@@ -362,7 +398,24 @@ struct Lattice {
             u = u - std::floor(u) + offset;  // offset after the reduction, so copies stay identical
             return kTwoPi * (u - std::floor(u));
         };
-        return f(phase(x / cell[0], shift[0]), phase(y / cell[1], shift[1]), phase(z / cell[2], shift[2]));
+        const double u = phase(x / cell[0], shift[0]), v = phase(y / cell[1], shift[1]), w = phase(z / cell[2], shift[2]);
+        const double fv = f(u, v, w);
+        if (!wall) return fv;
+        // The gradient from the reduced phase, so copies stay identical; in
+        // a parameter box, mapped to mm.
+        constexpr double h = 1e-5;
+        Vec3 g{f(u + h, v, w) - f(u - h, v, w), f(u, v + h, w) - f(u, v - h, w), f(u, v, w + h) - f(u, v, w - h)};
+        for (int a = 0; a < 3; ++a) g[a] *= kTwoPi / (2 * h * cell[a]);
+        if (shape.mapped()) g = shape.gradient({x, y, z}, g);
+        return fv / std::max(norm(g), 1e-12);
+    }
+
+    // The field without a trimming shape. A mapped shape stays: value()
+    // needs its mapping for a wall in mm.
+    Lattice untrimmed() const {
+        Lattice l = *this;
+        if (l.shape.trimmed()) l.shape = Shape{};
+        return l;
     }
 
     // Iso level c at a point.

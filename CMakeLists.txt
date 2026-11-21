@@ -115,6 +115,12 @@ endforeach()
 # Smooth STEP of the curved shapes: seams welded, curved caps, merged faces.
 step_test(tube --shape tube --radius 10 20 --height 10 --cells 1 6 1)
 step_test(torus-shell --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4)
+# Sphere shell: cone ends, and a dome that ends at the equator plane.
+step_test(sphere-shell --shape sphere-shell --radius 15 25 --cells 1 12 5)
+step_test(sphere-dome --shape sphere-shell --radius 15 25 --cells 1 12 3 --polar 10 90)
+# Wall thickness in mm (the field divided by its gradient), also mapped.
+step_test(wall --wall 0.6 --cells 1)
+step_test(wall-tube --shape tube --radius 10 20 --height 10 --cells 1 6 1 --wall 0.6)
 # Graded density and cell size (a mapped box).
 step_test(graded --cell 5 --cells 3 2 2 --cell-grade x 10 --density 0.3 0.15 --grade x)
 # Unit cell: exit 1 if opposite faces do not match.
@@ -155,6 +161,8 @@ add_test(NAME usage-density-and-level COMMAND tpms --density 0.3 --level 0.5 -o 
 set_tests_properties(usage-density-and-level PROPERTIES WILL_FAIL TRUE)
 add_test(NAME usage-channel-buffers-network COMMAND tpms --form network --channel-buffers x y 5 -o ${CMAKE_BINARY_DIR}/test-usage.stl)
 set_tests_properties(usage-channel-buffers-network PROPERTIES WILL_FAIL TRUE)
+add_test(NAME usage-wall-network COMMAND tpms --form network --wall 0.5 -o ${CMAKE_BINARY_DIR}/test-usage.stl)
+set_tests_properties(usage-wall-network PROPERTIES WILL_FAIL TRUE)
 # Every shape as a closed STL mesh (exit 1 if not closed, 2 if empty).
 add_test(NAME shape-tube COMMAND tpms --shape tube --radius 10 20 --height 20 --cells 1 8 2 --res 12 -o ${CMAKE_BINARY_DIR}/test-tube.stl)
 add_test(NAME shape-torus-shell COMMAND tpms --shape torus-shell --radius 4 10 --major 25 --cells 1 12 4 --res 10 -o ${CMAKE_BINARY_DIR}/test-torus-shell.stl)

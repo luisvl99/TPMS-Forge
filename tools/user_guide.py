@@ -46,6 +46,7 @@ VIEWS = [
     ("s-cylinder", "--shape cylinder --radius 15 --height 30"),
     ("s-sphere", "--shape sphere --radius 15"),
     ("s-torus", "--shape torus --radius 10 --major 30"),
+    ("s-sphere-shell", "--shape sphere-shell --radius 15 25 --cells 1 12 5"),
     ("g-density", "--density 0.1 0.4 --grade x --cells 4 2 2"),
     ("g-cell", "--cell 5 --cells 4 2 2 --cell-grade x 15"),
     ("u-cell", "--unit-cell --type schwarz-p --form network --density 0.3 --shift 0.5"),
@@ -312,10 +313,10 @@ def build():
         "<b>7 surface types</b>: gyroid, Schwarz P, diamond, Neovius, I-WP, FRD and Fischer-Koch S.",
         "<b>Sheet or network</b>, exported as the <b>solid</b> or as the <b>fluid</b> (the void around it). "
         "A sheet's fluid is two separate channels, written one file each.",
-        "<b>Thickness</b> by solid fraction or by iso level, constant or <b>graded</b> along an axis; "
-        "<b>graded cell size</b> in a box.",
-        "<b>Shapes</b>: box; tube and torus shell with cells that follow the curvature; cylinder, sphere and "
-        "torus cut from a straight lattice.",
+        "<b>Thickness</b> by solid fraction, by iso level or as a <b>wall thickness in mm</b>, constant or "
+        "<b>graded</b> along an axis; <b>graded cell size</b> in a box.",
+        "<b>Shapes</b>: box; tube, torus shell and sphere shell with cells that follow the curvature; cylinder, "
+        "sphere and torus cut from a straight lattice.",
         "<b>Smooth STEP</b> with few, large faces (or one face per patch with exact edges), <b>faceted STEP</b> "
         "and binary <b>STL</b>. Solids and faces carry <b>names</b> (walls, inlets, outlets).",
         "<b>Periodic unit cells</b> for homogenization, with matching opposite faces.",
@@ -458,15 +459,19 @@ Time      : 0.12 s""")
         f"{c('--density R')} (default 0.2) finds the iso level c that gives solid fraction R in one unit cell. "
         f"It always means the <i>solid</i> fraction, also with {c('--part void')}.",
         f"{c('--level C')} sets the iso level directly instead.",
+        f"{c('--wall T')} (sheet) sets the wall thickness in mm. The walls then lie about T/2 on each side of the "
+        "surface, so the thickness is nearly constant: 0.48 to 0.49 mm for a gyroid at 0.5 mm, against 0.58 to "
+        "0.71 mm by solid fraction 0.2. The solid fraction follows from it and is printed. Smooth STEP takes "
+        "several times longer this way.",
         "On bent or trimmed shapes, cells are stretched or cut, so the real solid fraction differs from R. "
         "tpms samples the field and prints the value it gives.",
     ])
     s += H2("Grading")
     s += bullets([
         f"{c('--density R0 R1')} changes the solid fraction linearly from R0 at the start of an axis to R1 at its "
-        f"end; {c('--grade x|y|z')} picks the axis (default x). {c('--level C0 C1')} grades the iso level. On a "
-        "tube or torus shell the axes are the cell axes: x radial, y around, z along the axis or around the "
-        "tube.",
+        f"end; {c('--grade x|y|z')} picks the axis (default x). {c('--level C0 C1')} grades the iso level and "
+        f"{c('--wall T0 T1')} the wall thickness. On a tube, torus or sphere shell the axes are the cell axes: x "
+        "radial, y around, z along the axis, around the tube, or from south to north.",
         f"{c('--cell-grade x|y|z L1')} (box) changes the cell length along that axis from {c('--cell')} at the "
         "start to L1 mm at the end; cells stretch along the axis. The box length along it is n × (L0 + L1) / 2.",
         "Both can be combined and work with every output. tpms prints the overall solid fraction.",
@@ -486,17 +491,26 @@ Time      : 0.12 s""")
         [c("box") + " (default)", "—", f"{c('--cell L')}, {c('--cells nx ny nz')}", "box [0, n × L]"],
         [c("tube"), c("--radius R0 R1 --height H"), c("--cells radial around axial"), "cells follow the shape"],
         [c("torus-shell"), c("--radius R0 R1 --major R"), c("--cells radial ring tube"), "cells follow the shape"],
+        [c("sphere-shell"), c("--radius R0 R1 --polar A0 A1"), c("--cells radial around S-N"), "cells follow the shape"],
         [c("cylinder"), c("--radius R --height H"), c("--cell L"), "trimmed"],
         [c("sphere"), c("--radius R"), c("--cell L"), "trimmed"],
         [c("torus"), c("--radius r --major R"), c("--cell L"), "trimmed"],
     ], [0.19, 0.3, 0.3, 0.21])
-    s += gallery([(v["s-tube"], "tube"), (v["s-torus-shell"], "torus-shell"), (v["s-cylinder"], "cylinder"),
-                  (v["s-sphere"], "sphere"), (v["s-torus"], "torus")], 3, height=44 * mm)
+    s += code("tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.step\n"
+              "tpms --shape sphere-shell --radius 15 25 --cells 1 12 5 --polar 20 160 -o shell.step\n"
+              "tpms --shape sphere --radius 15 --cell 10 -o sphere.step")
+    s += gallery([(v["s-tube"], "tube"), (v["s-torus-shell"], "torus-shell"), (v["s-sphere-shell"], "sphere-shell"),
+                  (v["s-cylinder"], "cylinder"), (v["s-sphere"], "sphere"), (v["s-torus"], "torus")], 3, height=40 * mm)
     s += bullets([
-        "<b>Cells follow the shape</b> (tube, torus shell): the lattice is bent into the shape, so no cell is cut "
+        "<b>Cells follow the shape</b> (tube, torus shell, sphere shell): the lattice is bent into the shape, so no cell is cut "
         "on the curved walls. The cell count around must be whole, so the lattice closes on itself. "
         f"{c('--radial log')} (default) keeps cells square: they grow with the radius; {c('--radial linear')} "
         "keeps their radial size constant. The GUI shows the resulting cell sizes.",
+        "<b>Sphere shell</b>: cells that follow a sphere cannot reach its poles (one point would get a different "
+        f"lattice for each longitude), so the shell runs from A0 to A1 degrees from the +z axis ({c('--polar')}, "
+        "default 20 160) and stays open around the poles. Its ends are cones from the center, or the plane z = 0 "
+        f"at 90 degrees: {c('--polar 10 90')} is a dome. Cells narrow around toward the ends; for a closed round "
+        "part use the trimmed sphere.",
         "<b>Trimmed</b> (cylinder, sphere, torus): a straight lattice of --cell cells, cut by the shape. Use "
         "these for solid round parts: bending cells around an axis or a pole would squeeze them to nothing.",
         "Smooth STEP works for every shape, and the cut faces are exact: cylinders and end planes, tori, or a "
@@ -505,8 +519,6 @@ Time      : 0.12 s""")
         f"If a trimmed shape fails because a wall passes very close to its axis or center, move the lattice a "
         f"little: for example {c('--shift 0.13 0.21 0.07')}.",
     ])
-    s += code("tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.step\n"
-              "tpms --shape sphere --radius 15 --cell 10 -o sphere.step")
 
     # 6 Special domains
     s += H1("Unit cells, plates and buffers")
@@ -595,7 +607,7 @@ Time      : 0.12 s""")
          "which channel they face (also header plates and their holes)"],
         [f"{c('x-')} {c('x+')} {c('y-')} {c('y+')} {c('z-')} {c('z+')}", "box faces, and the outer faces of "
          "plates and buffers: the inlet of --buffers x is x-"],
-        [f"{c('inner')} {c('outer')} {c('bottom')} {c('top')}", "tube and torus shell faces"],
+        [f"{c('inner')} {c('outer')} {c('bottom')} {c('top')}", "tube, torus shell and sphere shell faces"],
         [f"{c('side')} {c('bottom')} {c('top')} {c('surface')}", "cylinder side and ends; sphere and torus surface"],
     ], [0.36, 0.64])
     s.append(P("Use the names to pick boundaries in the CAD, CFD or FEA setup. Readers differ in what they "
@@ -727,19 +739,23 @@ tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
         ("--density R [R1]", "target solid fraction of one cell, 0 &lt; R &lt; 1 (default 0.2); with R1 graded "
                              "from R to R1 along --grade"),
         ("--level C [C1]", "iso level c (or graded from C to C1), instead of --density"),
+        ("--wall T [T1]", "sheet: wall thickness in mm (or graded from T to T1), instead of --density"),
         ("--grade x|y|z", "axis of a graded density or level (default x)"),
         ("--part solid|void", "the solid, or the shape minus the solid (fluid domain)"),
     ])
     s += ref("Shape", [
-        ("--shape NAME", "box, tube, torus-shell (cells follow the shape); cylinder, sphere, torus (trimmed)"),
+        ("--shape NAME", "box, tube, torus-shell, sphere-shell (cells follow the shape); cylinder, sphere, torus "
+                         "(trimmed)"),
         ("--cell L [Ly Lz]", "unit cell size in mm (box and trimmed shapes; default 10)"),
         ("--cells N [Ny Nz]", "cell counts (default 2): box x y z; tube radial, around, along; torus shell "
-                              "radial, around the ring, around the tube"),
-        ("--radius R | R0 R1", "tube, torus shell: inner and outer radius; cylinder, sphere: radius; torus: tube "
-                               "radius"),
+                              "radial, around the ring, around the tube; sphere shell radial, around, south to "
+                              "north"),
+        ("--radius R | R0 R1", "tube, torus or sphere shell: inner and outer radius; cylinder, sphere: radius; "
+                               "torus: tube radius"),
+        ("--polar A0 A1", "sphere shell: where it starts and ends, degrees from +z (default 20 160)"),
         ("--height H", "tube, cylinder: length along z"),
         ("--major R", "torus shell, torus: from the axis to the tube center"),
-        ("--radial log|linear", "tube, torus shell: radial spacing (default log: square cells)"),
+        ("--radial log|linear", "tube, torus or sphere shell: radial spacing (default log: square cells)"),
         ("--cell-grade x|y|z L1", "box: cell length from --cell to L1 mm along the axis"),
         ("--shift S [Sy Sz]", "offset of the lattice in cells (default 0)"),
         ("--unit-cell", "box: a periodic cell for homogenization (--cells defaults to 1)"),
@@ -790,6 +806,7 @@ tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
         "The surfaces are level-set approximations of the minimal surfaces, and sheet walls are not exactly "
         "constant in thickness.",
         "Merged Neovius sheets on tubes and torus shells can be read as invalid; use --exact for those.",
+        "A sphere shell stays open around its poles; --wall makes smooth STEP several times slower.",
         "Large lattices give large files: face count grows with the number of cells.",
         "Plates and buffers work on one axis of a box; channel buffers need a box and a sheet; grading is "
         "linear along one axis.",

@@ -33,20 +33,23 @@ using namespace tpms;
 namespace {
 
 // Shapes in the order of the GUI list, with their --shape names.
-const char* const kShapeArgs[] = {"box", "tube", "torus-shell", "cylinder", "sphere", "torus"};
+const char* const kShapeArgs[] = {"box", "tube", "torus-shell", "cylinder", "sphere", "torus", "sphere-shell"};
 const char* const kShapeLabels =
     "Box\0Tube (cells follow the shape)\0Torus shell (cells follow the shape)\0"
-    "Cylinder (trimmed)\0Sphere (trimmed)\0Torus (trimmed)\0";
-enum { kBox, kTube, kTorusShell, kCylinder, kSphere, kTorus };
+    "Cylinder (trimmed)\0Sphere (trimmed)\0Torus (trimmed)\0Sphere shell (cells follow the shape)\0";
+enum { kBox, kTube, kTorusShell, kCylinder, kSphere, kTorus, kSphereShell };
+
+// Shapes whose cells follow the curvature: inner and outer radius, cell counts.
+bool bentShape(int shape) { return shape == kTube || shape == kTorusShell || shape == kSphereShell; }
 
 struct Settings {
     int type = 0;  // index into surfaces()
     int form = 0;  // sheet, network
     int part = 0;  // solid, void
-    int thickness = 0;  // by density, by iso level
-    float density = 0.2f, level = 0.5f;
+    int thickness = 0;  // by density, by iso level, by wall thickness (sheet)
+    float density = 0.2f, level = 0.5f, wall = 0.5f;
     bool graded = false;                 // thickness changes linearly along axis `grade`
-    float density1 = 0.4f, level1 = 1.0f;  // at the end of that axis
+    float density1 = 0.4f, level1 = 1.0f, wall1 = 1.0f;  // at the end of that axis
     int grade = 0;
     bool cellGraded = false;  // box: the cell length changes along axis `cellGrade`
     int cellGrade = 0;
@@ -66,6 +69,7 @@ struct Settings {
     float cell[3] = {10, 10, 10};
     int cells[3] = {2, 2, 2};
     float r0 = 15, r1 = 25, height = 30, major = 40;
+    float polar[2] = {20, 160};  // sphere shell: from / to, degrees from +z
     int radial = 0;  // log, linear
     int patches = 3;
     float tol = 0;  // 0: automatic
@@ -77,13 +81,14 @@ struct Settings {
 
 // Sizes that suit each shape with 10 mm cells.
 void shapeDefaults(Settings& s) {
-    const int counts[6][3] = {{2, 2, 2}, {1, 12, 3}, {1, 24, 6}, {2, 2, 2}, {2, 2, 2}, {2, 2, 2}};
+    const int counts[7][3] = {{2, 2, 2}, {1, 12, 3}, {1, 24, 6}, {2, 2, 2}, {2, 2, 2}, {2, 2, 2}, {1, 12, 5}};
     for (int k = 0; k < 3; ++k) s.cells[k] = counts[s.shape][k];
     if (s.shape == kTube) s.r0 = 15, s.r1 = 25, s.height = 30;
     if (s.shape == kTorusShell) s.r0 = 5, s.r1 = 15, s.major = 40;
     if (s.shape == kCylinder) s.r1 = 15, s.height = 30;
     if (s.shape == kSphere) s.r1 = 15;
     if (s.shape == kTorus) s.r1 = 10, s.major = 30;
+    if (s.shape == kSphereShell) s.r0 = 15, s.r1 = 25, s.polar[0] = 20, s.polar[1] = 160;
 }
 
 std::string num(double v) {
@@ -102,15 +107,18 @@ std::vector<std::string> geometryArgs(const Settings& s) {
     std::vector<std::string> a = {"--type", surfaces()[size_t(s.type)].name, "--form", s.form ? "network" : "sheet",
                                   "--part", s.part ? "void" : "solid"};
     const char* const axes[3] = {"x", "y", "z"};
-    a.insert(a.end(), {s.thickness ? "--level" : "--density", num(s.thickness ? s.level : s.density)});
-    if (s.graded) a.push_back(num(s.thickness ? s.level1 : s.density1));
+    const char* const by[3] = {"--density", "--level", "--wall"};
+    const float start[3] = {s.density, s.level, s.wall}, end[3] = {s.density1, s.level1, s.wall1};
+    a.insert(a.end(), {by[s.thickness], num(start[s.thickness])});
+    if (s.graded) a.push_back(num(end[s.thickness]));
     if (s.graded && s.grade) a.insert(a.end(), {"--grade", axes[s.grade]});
     if (s.shape != kBox) a.insert(a.end(), {"--shape", kShapeArgs[s.shape]});
-    if (s.shape == kTube || s.shape == kTorusShell) a.insert(a.end(), {"--radius", num(s.r0), num(s.r1)});
-    if (s.shape >= kCylinder) a.insert(a.end(), {"--radius", num(s.r1)});
+    if (bentShape(s.shape)) a.insert(a.end(), {"--radius", num(s.r0), num(s.r1)});
+    else if (s.shape != kBox) a.insert(a.end(), {"--radius", num(s.r1)});
+    if (s.shape == kSphereShell) a.insert(a.end(), {"--polar", num(s.polar[0]), num(s.polar[1])});
     if (s.shape == kTube || s.shape == kCylinder) a.insert(a.end(), {"--height", num(s.height)});
     if (s.shape == kTorusShell || s.shape == kTorus) a.insert(a.end(), {"--major", num(s.major)});
-    if (s.shape != kTube && s.shape != kTorusShell) {
+    if (!bentShape(s.shape)) {
         a.push_back("--cell");
         for (int k = 0; k < (s.cubic ? 1 : 3); ++k) a.push_back(num(s.cell[k]));
     }
@@ -126,12 +134,12 @@ std::vector<std::string> geometryArgs(const Settings& s) {
         const bool same = s.shift[0] == s.shift[1] && s.shift[1] == s.shift[2];
         for (int k = 0; k < (same ? 1 : 3); ++k) a.push_back(num(s.shift[k]));
     }
-    if (s.shape <= kTorusShell) {
+    if (s.shape == kBox || bentShape(s.shape)) {
         a.push_back("--cells");
         const bool same = s.cells[0] == s.cells[1] && s.cells[1] == s.cells[2];
         for (int k = 0; k < (same ? 1 : 3); ++k) a.push_back(std::to_string(s.cells[k]));
     }
-    if ((s.shape == kTube || s.shape == kTorusShell) && s.radial) a.insert(a.end(), {"--radial", "linear"});
+    if (bentShape(s.shape) && s.radial) a.insert(a.end(), {"--radial", "linear"});
     const bool unitCell = s.shape == kBox && s.unitCell;  // implies --exact and --min-fragment 0
     if (s.minFragment != 0.01f && !unitCell) a.insert(a.end(), {"--min-fragment", num(s.minFragment)});
     return a;
@@ -231,8 +239,7 @@ Preview buildPreview(const std::vector<std::string>& args) {
     if (!parseArgs(args, o, p.error)) return p;
     const Shape& shape = o.shape;
     const Lattice lat = makeLattice(o);
-    Lattice open = lat;  // the lattice without the trimming shape
-    open.shape = Shape{};
+    const Lattice open = lat.untrimmed();
     // At most about 600 000 grid nodes, 6 to 24 steps per cell: fast enough
     // to follow the inputs.
     const Grid unit = gridOf(o, 1);
@@ -581,10 +588,10 @@ Settings fromOptions(const Options& o) {
     for (size_t k = 0; k < surfaces().size(); ++k)
         if (&surfaces()[k] == findSurface(o.type)) s.type = int(k);
     s.form = o.form == Form::Network, s.part = o.part == Part::Void;
-    s.thickness = o.hasLevel, s.density = float(o.density);
-    if (o.hasLevel) s.level = float(o.level);
+    s.thickness = o.wall ? 2 : o.hasLevel, s.density = float(o.density);
+    if (o.hasLevel) s.level = float(o.level), s.wall = float(2 * o.level);
     s.graded = o.graded, s.grade = o.grade;
-    if (o.graded) s.density1 = float(o.density1), s.level1 = float(o.level1);
+    if (o.graded) s.density1 = float(o.density1), s.level1 = float(o.level1), s.wall1 = float(2 * o.level1);
     s.cellGraded = o.shape.cellGrade >= 0;
     if (s.cellGraded) s.cellGrade = o.shape.cellGrade, s.cellEnd = float(o.shape.cellEnd);
     s.unitCell = o.unitCell;
@@ -605,6 +612,7 @@ Settings fromOptions(const Options& o) {
     if (s.shape != kBox) {
         s.r0 = float(o.shape.r0), s.r1 = float(o.shape.r1), s.height = float(o.shape.height);
         s.major = float(o.shape.major), s.radial = o.shape.logRadial ? 0 : 1;
+        for (int k = 0; k < 2; ++k) s.polar[k] = float(180 - o.shape.polar[1 - k] * 360 / 6.283185307179586);
     }
     s.tol = std::fabs(o.tol - autoTol(o)) < 1e-12 ? 0 : float(o.tol);
     s.patches = o.patches, s.exact = o.exact, s.faceted = o.faceted, s.res = o.res;
@@ -723,10 +731,16 @@ int main(int argc, char** argv) {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("f = %s", surfaces()[size_t(s.type)].formula.c_str());
         ImGui::Combo("Form", &s.form, "Sheet   |f| <= c\0Network   f <= c\0");
         ImGui::Combo("Part", &s.part, "Solid\0Void (fluid domain)\0");
-        ImGui::Combo("Thickness by", &s.thickness, "Solid fraction\0Iso level c\0");
+        if (s.form) s.thickness = std::min(s.thickness, 1);  // a wall thickness is for sheets
+        ImGui::Combo("Thickness by", &s.thickness,
+                     s.form ? "Solid fraction\0Iso level c\0" : "Solid fraction\0Iso level c\0Wall thickness (mm)\0");
         // Numbers are typed, with +/- steps; values are clamped to what tpms accepts.
         if (s.thickness == 0) ImGui::InputFloat("Solid fraction", &s.density, 0.01f, 0.05f, "%.3f");
-        else ImGui::InputFloat("Iso level c", &s.level, 0.01f, 0.1f, "%.4f");
+        else if (s.thickness == 1) ImGui::InputFloat("Iso level c", &s.level, 0.01f, 0.1f, "%.4f");
+        else ImGui::InputFloat("Wall thickness (mm)", &s.wall, 0.05f, 0.2f, "%.3f");
+        if (s.thickness == 2 && ImGui::IsItemHovered())
+            ImGui::SetTooltip("Nearly the same thickness all along the wall; the solid fraction follows from it.\n"
+                              "Smooth STEP export takes several times longer than by solid fraction.");
         const bool unitCell = s.shape == kBox && s.unitCell;  // a periodic cell has no grading
         if (unitCell) s.graded = false, s.cellGraded = false;
         ImGui::BeginDisabled(unitCell);
@@ -737,21 +751,32 @@ int main(int argc, char** argv) {
                               "to the value below, at its end (linear in the cell count).");
         if (s.graded) {
             if (s.thickness == 0) ImGui::InputFloat("Solid fraction at end", &s.density1, 0.01f, 0.05f, "%.3f");
-            else ImGui::InputFloat("Iso level c at end", &s.level1, 0.01f, 0.1f, "%.4f");
-            const char* axes = s.shape == kTube         ? "Radial\0Around\0Along the axis\0"
-                               : s.shape == kTorusShell ? "Radial\0Around the ring\0Around the tube\0"
-                                                        : "x\0y\0z\0";
+            else if (s.thickness == 1) ImGui::InputFloat("Iso level c at end", &s.level1, 0.01f, 0.1f, "%.4f");
+            else ImGui::InputFloat("Wall thickness at end", &s.wall1, 0.05f, 0.2f, "%.3f");
+            const char* axes = s.shape == kTube          ? "Radial\0Around\0Along the axis\0"
+                               : s.shape == kTorusShell  ? "Radial\0Around the ring\0Around the tube\0"
+                               : s.shape == kSphereShell ? "Radial\0Around\0South to north\0"
+                                                         : "x\0y\0z\0";
             ImGui::Combo("Along", &s.grade, axes);
         }
         s.density = std::clamp(s.density, 0.01f, 0.99f), s.density1 = std::clamp(s.density1, 0.01f, 0.99f);
+        s.wall = std::max(0.01f, s.wall), s.wall1 = std::max(0.01f, s.wall1);
 
         ImGui::SeparatorText("Shape");
         if (ImGui::Combo("Shape", &s.shape, kShapeLabels)) shapeDefaults(s);
-        const bool bent = s.shape == kTube || s.shape == kTorusShell;
+        const bool bent = bentShape(s.shape);
         if (s.shape == kTorusShell || s.shape == kTorus) ImGui::InputFloat("Ring radius (mm)", &s.major, 1, 5, "%.2f");
         if (bent) {
-            ImGui::InputFloat(s.shape == kTube ? "Inner radius (mm)" : "Inner tube radius", &s.r0, 1, 5, "%.2f");
-            ImGui::InputFloat(s.shape == kTube ? "Outer radius (mm)" : "Outer tube radius", &s.r1, 1, 5, "%.2f");
+            ImGui::InputFloat(s.shape == kTorusShell ? "Inner tube radius" : "Inner radius (mm)", &s.r0, 1, 5, "%.2f");
+            ImGui::InputFloat(s.shape == kTorusShell ? "Outer tube radius" : "Outer radius (mm)", &s.r1, 1, 5, "%.2f");
+            if (s.shape == kSphereShell) {
+                ImGui::InputFloat2("From / to (deg)", s.polar, "%.1f");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Where the shell starts and ends, in degrees from the +z axis. Cells that follow\n"
+                                      "a sphere cannot reach its poles, so the shell is open around them.");
+                s.polar[0] = std::clamp(s.polar[0], 0.5f, 179.0f);
+                s.polar[1] = std::clamp(s.polar[1], s.polar[0] + 0.5f, 179.5f);
+            }
         } else if (s.shape != kBox) {
             ImGui::InputFloat(s.shape == kTorus ? "Tube radius (mm)" : "Radius (mm)", &s.r1, 1, 5, "%.2f");
         }
@@ -760,7 +785,10 @@ int main(int argc, char** argv) {
         s.r0 = std::max(0.1f, s.r0), s.r1 = std::max(bent ? s.r0 + 0.1f : 0.1f, s.r1);
         s.height = std::max(0.1f, s.height), s.major = std::max(s.r1 + 0.1f, s.major);
         if (bent) {
-            ImGui::InputInt3(s.shape == kTube ? "Cells: r, around, z" : "Cells: r, ring, tube", s.cells);
+            ImGui::InputInt3(s.shape == kTube         ? "Cells: r, around, z"
+                             : s.shape == kTorusShell ? "Cells: r, ring, tube"
+                                                      : "Cells: r, around, S-N",
+                             s.cells);
             ImGui::Combo("Radial spacing", &s.radial, "Log (square cells)\0Linear (even thickness)\0");
         } else {
             ImGui::Checkbox("Cubic cell", &s.cubic);
@@ -836,7 +864,12 @@ int main(int argc, char** argv) {
         else if (s.shape == kTube)
             ImGui::TextDisabled("Cells: %.1f mm radial, %.1f-%.1f around, %.1f axial", (s.r1 - s.r0) / s.cells[0],
                                 tau * s.r0 / s.cells[1], tau * s.r1 / s.cells[1], s.height / s.cells[2]);
-        else if (s.shape == kTorusShell)
+        else if (s.shape == kSphereShell) {
+            const float deg = tau / 360, narrow = std::min(std::sin(s.polar[0] * deg), std::sin(s.polar[1] * deg));
+            const float arc = (s.polar[1] - s.polar[0]) * deg / s.cells[2];
+            ImGui::TextDisabled("Cells: %.1f mm radial, %.1f-%.1f around, %.1f-%.1f S-N", (s.r1 - s.r0) / s.cells[0],
+                                tau * s.r0 * narrow / s.cells[1], tau * s.r1 / s.cells[1], s.r0 * arc, s.r1 * arc);
+        } else if (s.shape == kTorusShell)
             ImGui::TextDisabled("Cells: %.1f mm radial, %.1f-%.1f ring, %.1f-%.1f tube",
                                 (s.r1 - s.r0) / s.cells[0], tau * (s.major - s.r1) / s.cells[1],
                                 tau * (s.major + s.r1) / s.cells[1], tau * s.r0 / s.cells[2], tau * s.r1 / s.cells[2]);

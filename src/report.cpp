@@ -132,8 +132,7 @@ Report makeReport(const Options& o, const Lattice& lat, int res) {
     if (s.trimmed()) r.step = h;  // the grid covers more than the shape
     const bool sheet = lat.form == Form::Sheet;
     r.channels = sheet ? 2 : 1;
-    Lattice open = lat;  // the solid's lattice field without the trimming shape
-    open.shape = Shape{};
+    Lattice open = lat.untrimmed();  // the solid's lattice field without the trimming shape
     open.part = Part::Solid;
     auto toMm = [&](Vec3 p) { return s.mapped() ? s.map(p) : p; };
 
@@ -334,9 +333,11 @@ std::vector<std::pair<std::string, std::string>> reportRows(const Report& r, con
     if (o.shape.slabAxis >= 0 || o.shape.channelAxis[0] >= 0)
         row("Note", "for the lattice box: %s are not included",
             o.plates ? "plates" : o.buffers ? "buffers" : "channel buffers and their plates");
-    if (r.thickness[0] > 0 && r.thickness[0] < r.step)
-        row("Note", "walls down to %.3g mm are thinner than the mesh step (%.3g mm): piece counts and the solid "
-                    "volume can be off there. Raise --res.", r.thickness[0], r.step);
+    // A wall needs about two grid steps across: at 1.2 steps the solid
+    // volume already comes out 10 % low.
+    if (r.thickness[0] > 0 && r.thickness[0] < 2 * r.step)
+        row("Note", "walls down to %.3g mm are thinner than two mesh steps (2 x %.3g mm): the solid volume and "
+                    "piece counts can be off there. Raise --res.", r.thickness[0], r.step);
     return rows;
 }
 

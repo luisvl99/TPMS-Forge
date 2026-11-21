@@ -30,6 +30,9 @@ Lattice
                         the start of the --grade axis to R1 at its end.
   --level C [C1]        Iso level c (or graded from C to C1). Use instead of
                         --density.
+  --wall T [T1]         Sheet: wall thickness in mm (or graded from T to T1),
+                        nearly constant along the wall. Use instead of
+                        --density: the solid fraction follows from it.
   --grade x|y|z         Axis of a graded --density or --level (default x).
                         Tube, torus-shell: x radial, y around, z along the
                         axis or around the tube. Linear in the cell count.
@@ -37,7 +40,8 @@ Lattice
                         CFD). --density always means the solid fraction.
 
 Shape (default box)
-  --shape NAME          box | tube | torus-shell   (cells follow the shape)
+  --shape NAME          box | tube | torus-shell | sphere-shell
+                                                   (cells follow the shape)
                         cylinder | sphere | torus  (straight cells, trimmed)
   --cell L [Ly Lz]      Unit cell size in mm (box and trimmed; default 10).
   --unit-cell           box: a periodic cell for homogenization (RVE).
@@ -68,12 +72,18 @@ Shape (default box)
                           box: along x, y, z
                           tube: radial, around, along the axis
                           torus-shell: radial, around the ring, around the tube
-  --radius R | R0 R1    tube, torus-shell: inner and outer radius.
+                          sphere-shell: radial, around, from south to north
+  --radius R | R0 R1    tube, torus-shell, sphere-shell: inner and outer radius.
                         cylinder, sphere: radius. torus: tube radius.
   --height H            tube, cylinder: length along z.
   --major R             torus-shell, torus: from the axis to the tube center.
-  --radial log|linear   tube, torus-shell: radial spacing (default log, which
-                        keeps cells square; linear keeps them equally thick).
+  --polar A0 A1         sphere-shell: where it starts and ends, in degrees
+                        from the +z axis (default 20 160). Cells that follow
+                        a sphere cannot reach its poles, so the shell is open
+                        around them: cones there, or a plane at 90.
+  --radial log|linear   tube, torus-shell, sphere-shell: radial spacing
+                        (default log, which keeps cells square; linear keeps
+                        them equally thick).
   Round shapes are centered at the origin with their axis along z.
 
 STEP (smooth B-spline faces; every shape)
@@ -120,7 +130,8 @@ struct ShapeName {
     ShapeKind kind;
 };
 const ShapeName kShapes[] = {{"box", ShapeKind::Box},           {"tube", ShapeKind::Tube},
-                             {"torus-shell", ShapeKind::TorusShell}, {"cylinder", ShapeKind::Cylinder},
+                             {"torus-shell", ShapeKind::TorusShell}, {"sphere-shell", ShapeKind::SphereShell},
+                             {"cylinder", ShapeKind::Cylinder},
                              {"sphere", ShapeKind::Sphere},     {"torus", ShapeKind::Torus}};
 
 // x, y or z as 0, 1, 2; -1 otherwise.
@@ -256,7 +267,10 @@ const char* shapeName(ShapeKind k) {
 
 bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& error) {
     double cells[3] = {double(o.cells[0]), double(o.cells[1]), double(o.cells[2])};
-    bool cellGiven = false, cellsGiven = false, densityGiven = false;
+    bool cellGiven = false, cellsGiven = false;
+    std::string thickness;  // the option that set it: --density, --level or --wall
+    double polar[2] = {20, 160};  // sphere shell, degrees from +z
+    bool polarGiven = false;
     int radii = 0;
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
@@ -275,14 +289,16 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
             if (p == "solid") o.part = Part::Solid;
             else if (p == "void" || p == "fluid") o.part = Part::Void;
             else return error = "--part must be solid or void", false;
-        } else if (a == "--density" || a == "--level") {
+        } else if (a == "--density" || a == "--level" || a == "--wall") {
             n = numbers(args, i, r, 2);
             if (n == 0) return error = a + " needs 1 or 2 numbers", false;
-            const bool isLevel = a == "--level";
-            (isLevel ? o.level : o.density) = r[0];
-            (isLevel ? o.level1 : o.density1) = r[n - 1];
-            o.hasLevel |= isLevel, densityGiven |= !isLevel;
-            if (o.hasLevel && densityGiven) return error = "use --density or --level, not both", false;
+            if (!thickness.empty() && thickness != a) return error = "use one of --density, --level or --wall", false;
+            thickness = a;
+            const bool isLevel = a != "--density";
+            const double k = a == "--wall" ? 0.5 : 1;  // a wall's level is half its thickness
+            (isLevel ? o.level : o.density) = k * r[0];
+            (isLevel ? o.level1 : o.density1) = k * r[n - 1];
+            o.hasLevel = isLevel, o.wall = a == "--wall";
             o.graded = n == 2;
         } else if (a == "--grade" && hasValue) {
             if ((o.grade = axisOf(lower(args[++i]))) < 0) return error = "--grade must be x, y or z", false;
@@ -345,6 +361,9 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
         } else if (a == "--major" && hasValue && number(args[i + 1], v)) {
             o.shape.major = v;
             ++i;
+        } else if (a == "--polar") {
+            if (numbers(args, i, polar, 2) != 2) return error = "--polar needs 2 angles in degrees", false;
+            polarGiven = true;
         } else if (a == "--radial" && hasValue) {
             const std::string s = lower(args[++i]);
             if (s == "log" || s == "linear") o.shape.logRadial = s == "log";
@@ -376,8 +395,9 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
     if (!o.graded) o.density1 = o.density, o.level1 = o.level;
     if (!o.hasLevel && !(o.density > 0 && o.density < 1 && o.density1 > 0 && o.density1 < 1))
         return error = "--density must be in (0, 1)", false;
+    if (o.wall && o.form != Form::Sheet) return error = "--wall needs --form sheet", false;
     if (o.hasLevel && o.form == Form::Sheet && !(o.level > 0 && o.level1 > 0))
-        return error = "sheet needs --level > 0", false;
+        return error = o.wall ? "--wall needs a thickness > 0" : "sheet needs --level > 0", false;
 
     Shape& s = o.shape;
     const std::string name = shapeName(s.kind);
@@ -422,6 +442,11 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
         if (needsMajor && !(s.major > s.r1)) return error = "--shape " + name + " needs --major > the radius", false;
         if (!needsMajor && s.major) return error = "--major does not apply to --shape " + name, false;
     }
+    if (polarGiven && s.kind != ShapeKind::SphereShell) return error = "--polar needs --shape sphere-shell", false;
+    if (!(0 < polar[0] && polar[0] < polar[1] && polar[1] < 180))
+        return error = "--polar needs 0 < A0 < A1 < 180 (degrees from the +z axis)", false;
+    const double degree = kTwoPi / 360;
+    s.polar[0] = (180 - polar[1]) * degree, s.polar[1] = (180 - polar[0]) * degree;  // from the south pole
     for (int a = 0; a < 3; ++a) {
         if (!(o.cell[a] > 0)) return error = "--cell must be > 0", false;
         if (cells[a] < 1 || cells[a] > 1e5 || cells[a] != std::floor(cells[a]))
@@ -462,6 +487,7 @@ Lattice makeLattice(const Options& o) {
         return levelForDensity(values, o.density + (o.density1 - o.density) * t);
     };
     lat.level = levelAt(0);
+    lat.wall = o.wall;
     if (o.graded) {
         const int a = lat.grade = o.grade;
         if (o.shape.trimmed()) lat.gradeFrom = -o.shape.half()[a], lat.gradeTo = o.shape.half()[a];
@@ -777,7 +803,12 @@ int run(const std::vector<std::string>& args, const Print& print) {
     say(print, "Surface   : %s, %s, %s part", findSurface(o.type)->name.c_str(),
         o.form == Form::Sheet ? "sheet" : "network", o.part == Part::Solid ? "solid" : "void");
     const char* const kAxes = "xyz";
-    if (o.graded && o.hasLevel)
+    if (o.wall && o.graded)
+        say(print, "Wall      : %g to %g mm along %c (solid fraction %.4f from the field)", 2 * lat.levels.front(),
+            2 * lat.levels.back(), kAxes[o.grade], solidFraction(expected));
+    else if (o.wall)
+        say(print, "Wall      : %g mm (solid fraction %.4f from the field)", 2 * lat.level, solidFraction(expected));
+    else if (o.graded && o.hasLevel)
         say(print, "Level c   : %.5g to %.5g along %c", lat.levels.front(), lat.levels.back(), kAxes[o.grade]);
     else if (o.graded)
         say(print, "Level c   : %.5g to %.5g along %c (from target solid fraction %.3f to %.3f)", lat.levels.front(),
@@ -810,6 +841,11 @@ int run(const std::vector<std::string>& args, const Print& print) {
             s.logRadial ? "log" : "linear");
         say(print, "Cells     : %d radial x %d around x %d %s", cells[0], cells[1], cells[2],
             s.kind == ShapeKind::Tube ? "along the axis" : "around the tube");
+        break;
+    case ShapeKind::SphereShell:
+        say(print, "Shape     : sphere-shell, radius %g to %g mm, from %g to %g degrees from +z, %s radial spacing",
+            s.r0, s.r1, 180 - s.polar[1] * 360 / kTwoPi, 180 - s.polar[0] * 360 / kTwoPi, s.logRadial ? "log" : "linear");
+        say(print, "Cells     : %d radial x %d around x %d from south to north", cells[0], cells[1], cells[2]);
         break;
     default: {
         char extra[64] = "";

@@ -303,8 +303,7 @@ public:
     Builder(const Lattice& lat, const int cells[3], int res, double tol)
         : lat_(lat), shape_(lat.shape), straight_(lat.shape.trimmed()), mapped_(lat.shape.mapped() || straight_),
           periodic_(lat.shape.periodic()), tol_(tol) {
-        open_ = lat;
-        open_.shape = Shape{};  // the field without trimming
+        open_ = lat.untrimmed();
         for (int a = 0; a < 3; ++a) {
             const double cell = straight_ ? 1.0 : lat.cell[a];  // in the parameter box
             N_[a] = cells[a] * res;
@@ -926,12 +925,19 @@ public:
                     for (int k = 0; k < 3; ++k)
                         if (f.normal[k] != 0) x[(k + 1) % 3] = 1;
                     surface = st.add("PLANE(''," + placement(mm(f.origin), f.normal, x) + ")");
+                } else if (!flatCap(f.box) && a == 2 && shape_.kind == ShapeKind::SphereShell) {
+                    // A sphere shell's end: the cone from the center at its
+                    // angle t from the south pole, around -z (t < 90) or +z.
+                    const double t = shape_.polar[side], pi = 0.5 * kTwoPi, alpha = t < 0.5 * pi ? t : pi - t;
+                    const Vec3 axis{0, 0, t < 0.5 * pi ? -1.0 : 1.0};
+                    surface = st.add("CONICAL_SURFACE(''," + placement(axis * (shape_.r0 * std::cos(alpha)), axis, {1, 0, 0}) +
+                                     "," + real(shape_.r0 * std::sin(alpha)) + "," + real(alpha) + ")");
                 } else if (!flatCap(f.box)) {  // radial cap of a curved shape, around z
                     const std::string ax = placement({}, {0, 0, 1}, {1, 0, 0}), r = real(side ? shape_.r1 : shape_.r0);
                     const ShapeKind k = shape_.kind;
                     surface = k == ShapeKind::Tube || k == ShapeKind::Cylinder
                                   ? st.add("CYLINDRICAL_SURFACE(''," + ax + "," + r + ")")
-                              : k == ShapeKind::Sphere
+                              : k == ShapeKind::Sphere || k == ShapeKind::SphereShell
                                   ? st.add("SPHERICAL_SURFACE(''," + placement({}, shape_.frame[2], shape_.frame[0]) + "," + r + ")")
                                   : st.add("TOROIDAL_SURFACE(''," + ax + "," + real(shape_.major) + "," + r + ")");
                 } else {  // plane through a corner of the face, normal out of the solid
@@ -984,7 +990,7 @@ public:
                     bounds.push_back(st.add(std::string(k ? "FACE_BOUND" : "FACE_OUTER_BOUND") + "(''," +
                                             ref(loop(f.loops[k])) + (cavity ? ",.F.)" : ",.T.)")));
                 // The inner radial cap faces against its surface's normal.
-                const bool against = (f.box == 0 && !flatCap(0)) != cavity;
+                const bool against = capAgainst(f.box) != cavity;
                 faces.push_back(st.add("ADVANCED_FACE(" + quote(faceName(f)) + "," + refList(bounds) + "," +
                                        ref(surface) + (against ? ",.F.)" : ",.T.)")));
             }
@@ -1121,10 +1127,23 @@ private:
         return n;
     }
 
-    // Box face F is capped by a plane (else a cylinder or torus around z).
+    // Box face F is capped by a plane (else a cylinder, sphere, torus or
+    // cone around z). A sphere shell's end at 90 degrees is the plane z = 0.
     bool flatCap(int F) const {
         const bool tube = shape_.kind == ShapeKind::Tube || shape_.kind == ShapeKind::Cylinder;
-        return shape_.kind == ShapeKind::Box || (tube && F / 2 == 2);
+        const bool equator = shape_.kind == ShapeKind::SphereShell && F / 2 == 2 &&
+                             std::fabs(std::cos(shape_.polar[F % 2])) < 1e-12;
+        return shape_.kind == ShapeKind::Box || (tube && F / 2 == 2) || equator;
+    }
+
+    // The cap on box face F faces against its surface's normal (which
+    // points away from the axis or center): the inner cylinder, sphere or
+    // torus; and a sphere shell's end cone where the shell lies away from
+    // the cone's axis (the start around -z, or the end around +z).
+    bool capAgainst(int F) const {
+        if (F < 0 || flatCap(F)) return false;
+        if (F == 0) return true;
+        return shape_.kind == ShapeKind::SphereShell && F / 2 == 2 && (F == 4) == (shape_.polar[F % 2] < 0.25 * kTwoPi);
     }
 
     // Agglomerative clustering of adjacent patches: merge the neighbor pair
@@ -2358,8 +2377,7 @@ SmoothReport writeSmoothStep(const std::string& path, const std::string& name, c
             // a wall (the gyroid's z axis). Take a generic axis whose poles
             // lie outside the part, or else in different regions (one
             // outside, or a sheet's two fluid channels), never both in one.
-            Lattice open = lat;
-            open.shape = Shape{};
+            const Lattice open = lat.untrimmed();
             const bool channels = lat.form == Form::Sheet && lat.part == Part::Void;
             auto region = [&](Vec3 q) {  // 0 outside the part, else 1 (or 2: a sheet's channel f < -c)
                 return open(q.x, q.y, q.z) > 0 ? 0 : channels && open.value(q.x, q.y, q.z) < 0 ? 2 : 1;
@@ -2378,7 +2396,8 @@ SmoothReport writeSmoothStep(const std::string& path, const std::string& name, c
             x = x * (1 / norm(x));
             L.shape.frame[0] = x, L.shape.frame[1] = cross(best, x), L.shape.frame[2] = best;
         }
-    } else if (lat.grade < 0 && cells[0] * cells[1] * cells[2] > 1) {
+    } else if (lat.grade < 0 && cells[0] * cells[1] * cells[2] > 1 && !(lat.wall && lat.shape.mapped())) {
+        // (A wall in mm needs the mapping, which the straight probe cell lacks.)
         patches = probeCell(lat, patches, last, tol);
     }
     SmoothReport r;

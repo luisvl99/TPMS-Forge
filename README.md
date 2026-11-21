@@ -2,7 +2,7 @@
 
 `tpms` turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface. There is a command-line tool, `tpms`, and a desktop app with a live 3D preview, `tpms-gui`.
 
-**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube or torus shell with cells that follow the curvature, or a cylinder, sphere or torus cut from a straight lattice; every shape has smooth STEP. Density and cell size can be graded, and a property report gives volumes, wetted area, hydraulic diameters and wall thickness for CFD and FEA.
+**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube, torus shell or sphere shell with cells that follow the curvature, or a cylinder, sphere or torus cut from a straight lattice; every shape has smooth STEP. Density, wall thickness (in mm) and cell size can be graded, and a property report gives volumes, wetted area, hydraulic diameters and wall thickness for CFD and FEA.
 
 ![tpms-gui](docs/gui.png)
 
@@ -60,6 +60,18 @@ Graded: solid fraction from 0.1 to 0.4 along x, and cells that grow from 5 to 15
 
 ```bash
 build/tpms --density 0.1 0.4 --grade x --cell 5 --cells 4 2 2 --cell-grade x 15 -o graded.step
+```
+
+Gyroid sheet with walls 0.5 mm thick (nearly constant; the solid fraction follows):
+
+```bash
+build/tpms --wall 0.5 --cell 8 --cells 4 -o gyroid_wall.step
+```
+
+Sphere shell, 15 to 25 mm radius, with cells that follow it, from 20 to 160 degrees from the +z axis:
+
+```bash
+build/tpms --shape sphere-shell --radius 15 25 --cells 1 12 5 --polar 20 160 -o shell.step
 ```
 
 Unit cell of a Schwarz P network for homogenization, shifted half a cell so a node sits at its center:
@@ -123,11 +135,12 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 - `--form sheet` is the region |f| ≤ c: a wall around the surface. The wall thickness comes from the level set, so it is not exactly constant.
 - `--form network` is the region f ≤ c: one of the two channel networks.
 - `--density R` finds c so that one unit cell has solid volume fraction R. It always means the solid fraction, also with `--part void`.
+- `--wall T` (sheet) sets the wall thickness in mm instead. The field becomes f / |grad f| in mm, about the distance to the surface f = 0, and the sheet is where it lies within ±T/2: the thickness is nearly constant along the wall (gyroid at 0.5 mm: 0.48 to 0.49 mm, against 0.58 to 0.71 mm by solid fraction 0.2; Schwarz P, diamond and I-WP within about 10 %, FRD within about 20 %). The solid fraction follows from it and is printed. The gradient takes 6 more evaluations of f, so smooth STEP takes several times longer.
 - `--part void` exports the shape minus the solid. Use it as the fluid domain for CFD. A sheet's fluid is two separate channels, f > c (A) and f < −c (B). In STEP, each channel goes to a file of its own: `-o x.step` writes `x_A.step` and `x_B.step` (smooth and `--faceted`). If a solid lies in both channels, as with `--buffers`, which join them, the tool writes one file and says why. STL keeps both channels in one file. The faceted path meshes each channel on its own, so a sheet thinner than the grid cannot join them.
 
 ## Grading
 
-- `--density R0 R1` changes the solid fraction linearly from R0 at the start of an axis to R1 at its end. `--grade x|y|z` picks the axis (default x). For a tube or torus shell the axes are the cell axes: x radial, y around, z along the axis (tube) or around the tube (torus shell). The change is linear in the cell count along the axis. `--level C0 C1` grades the iso level instead.
+- `--density R0 R1` changes the solid fraction linearly from R0 at the start of an axis to R1 at its end. `--grade x|y|z` picks the axis (default x). For a tube or torus shell the axes are the cell axes: x radial, y around, z along the axis (tube) or around the tube (torus shell). The change is linear in the cell count along the axis. `--level C0 C1` grades the iso level instead, `--wall T0 T1` the wall thickness. On a sphere shell: x radial, y around, z from south to north.
 - `--cell-grade x|y|z L1` (box) changes the cell length along that axis linearly from `--cell` at the start to L1 mm at the end. The other cell edges keep their size, so cells stretch along the axis. The box length along it is n × (L0 + L1) / 2.
 - Both work with every output, and both can be combined. The tool prints the overall solid fraction the grading gives.
 - Smooth STEP of a cell-graded box is built like the tube: in a box with one unit per cell, mapped to mm. The patches then follow the cells at any size.
@@ -175,7 +188,7 @@ Solids and faces carry names, to pick boundaries in CAD, CFD and FEA:
 | `solid`, `fluid`, `fluid A`, `fluid B` | solids: the part; a sheet's fluid channels are A (f > c) and B (f < −c). More pieces get `2`, `3`, ... |
 | `wall`, `wall A`, `wall B` | walls between solid and fluid; on a sheet, A and B tell which channel they face (with channel buffers also the header plates and their holes) |
 | `x-`, `x+`, `y-`, `y+`, `z-`, `z+` | box faces (the outer faces of plates and buffers too: the inlet of `--buffers x` is `x-`, and with `--channel-buffers x y` channel A's ports are `x-` and `x+`) |
-| `inner`, `outer`, `bottom`, `top` | tube and torus shell faces |
+| `inner`, `outer`, `bottom`, `top` | tube, torus shell and sphere shell faces (a sphere shell's ends are bottom and top) |
 | `side`, `bottom`, `top`, `surface` | trimmed shapes: cylinder side and ends, sphere and torus surface |
 
 The names are written on the STEP items (`MANIFOLD_SOLID_BREP`, `ADVANCED_FACE`). Readers differ in what they import: OpenCASCADE reads them with `read.stepcaf.subshapes.name` on; a single solid often takes the file (product) name instead.
@@ -211,11 +224,13 @@ The values come from closed meshes at `--res` steps per cell; the fluid channels
 | `box` (default) | — | `--cell L`, `--cells nx ny nz` | box `[0, n x L]` |
 | `tube` | `--radius R0 R1 --height H` | `--cells radial around axial` | cells follow the shape |
 | `torus-shell` | `--radius R0 R1 --major R` | `--cells radial ring tube` | cells follow the shape |
+| `sphere-shell` | `--radius R0 R1 --polar A0 A1` | `--cells radial around south-north` | cells follow the shape |
 | `cylinder` | `--radius R --height H` | `--cell L` | trimmed |
 | `sphere` | `--radius R` | `--cell L` | trimmed |
 | `torus` | `--radius r --major R` | `--cell L` | trimmed |
 
-- **Cells follow the shape** (tube, torus shell): the lattice is built in a parameter box with one unit per cell and bent into the shape. No cell is cut on the curved walls, and the cell count around must be whole, so the lattice closes on itself. `--radial log` (default) keeps cells square: they grow with the radius. `--radial linear` keeps the radial cell size constant, so cells stretch around on the outside. The GUI shows the resulting cell sizes.
+- **Cells follow the shape** (tube, torus shell, sphere shell): the lattice is built in a parameter box with one unit per cell and bent into the shape. No cell is cut on the curved walls, and the cell count around must be whole, so the lattice closes on itself. `--radial log` (default) keeps cells square: they grow with the radius. `--radial linear` keeps the radial cell size constant, so cells stretch around on the outside. The GUI shows the resulting cell sizes.
+- **Sphere shell**: cells that follow a sphere cannot reach its poles: there, one point would get a different lattice for each longitude. So the shell runs from A0 to A1 degrees from the +z axis (`--polar`, default 20 160) and is open around the poles. Its ends are cones from the center, or the plane z = 0 at 90 degrees (a dome: `--polar 10 90`). Around, cells narrow toward the ends, by sin A: at 20 degrees to a third of their size at the equator. For a closed spherical part, use the trimmed `sphere`.
 - **Trimmed** (cylinder, sphere, torus): a straight lattice of `--cell` cells, cut by the shape. Use this for solid shapes: bending cells around an axis or a pole would squeeze them to nothing there.
 - Round shapes are centered at the origin with their axis along z.
 - Bending stretches cells, and stretched walls are thicker, so the solid fraction differs from `--density` (which is per unit cell). The tool samples the field and prints the real value.
@@ -336,11 +351,11 @@ Merged files have 3–8 times fewer faces and are usually smaller than `--exact`
    - The STEP uncertainty is set to `tol`, so readers accept the edge gaps.
 10. Write STEP AP214: `B_SPLINE_SURFACE_WITH_KNOTS` faces, `B_SPLINE_CURVE_WITH_KNOTS` edges, `PLANE` caps with `LINE` edges on the box.
 
-For a tube or torus shell, the same steps run in the parameter box (one unit per cell):
+For a tube, torus shell or sphere shell, the same steps run in the parameter box (one unit per cell):
 
 - Corners and samples are projected onto the surface in the parameter box, then mapped to mm. The B-splines are fitted to the mapped samples, and the fit error is measured in mm.
 - The faces where the parameter box wraps around (the seam) get no caps. The field repeats there, so both copies of the seam get the same patches. After fitting, the far copy of every seam vertex and edge is welded to the near one.
-- Caps lie on exact `CYLINDRICAL_SURFACE`s (tube walls), `TOROIDAL_SURFACE`s (torus shell walls) or `PLANE`s (tube ends). Their edges along the shape's box edges (circles and straight lines) are B-spline curves within `tol` / 4, so the STEP uncertainty is `tol`. A curved cap keeps the seam as an edge it uses twice, as CAD seams are. A tube end is joined across the seam into an annulus with holes.
+- Caps lie on exact `CYLINDRICAL_SURFACE`s (tube walls), `TOROIDAL_SURFACE`s (torus shell walls), `SPHERICAL_SURFACE`s and `CONICAL_SURFACE`s (sphere shell walls and ends) or `PLANE`s (tube ends, a sphere shell's end at 90 degrees). Their edges along the shape's box edges (circles and straight lines) are B-spline curves within `tol` / 4, so the STEP uncertainty is `tol`. A curved cap keeps the seam as an edge it uses twice, as CAD seams are. A tube end is joined across the seam into an annulus with holes.
 - Volumes use a flux in the parameter box: Phi(u) with dPhi/du = det J, the volume stretch of the mapping. The flux through the closed patch and cap surfaces is the volume in mm, exact up to the face samples. On the seam the flux is zero, so no cap is needed there.
 
 For a cylinder, sphere or torus (trimmed shapes), the same steps run in a parameter box in cylindrical, spherical or toroidal coordinates (radius from the axis, the center line or the center, and angles), and the straight lattice is evaluated at the mapped point:
@@ -377,6 +392,7 @@ Channel buffers replace the caps on the faces across each channel's axis. The ot
 - **Names, plates and buffers (done):** named solids and faces; plates and inlet/outlet buffers on the box.
 - **Inner cavities, smooth trimmed shapes, faster search (done):** voids (`BREP_WITH_VOIDS`) in every STEP and STL; smooth STEP for the cylinder, sphere and torus; the patch search on one cell first; OpenCASCADE checks in `ctest`.
 - **Heat exchangers and report estimates (done):** channel buffers (separate inlets and outlets per fluid channel, with header plates); mass, stiffness bounds, permeability and pressure drop estimates; CSV reports.
+- **Wall thickness and sphere shell (done):** sheets with a set wall thickness in mm; a sphere shell with cells that follow it.
 - **Next:** test the names in NX; custom formulas and more surfaces.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.
 

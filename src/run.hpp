@@ -21,6 +21,7 @@ struct Options {
     double density = 0.2, density1 = 0;  // density1: at the end of a graded lattice
     double level = 0, level1 = 0;
     bool hasLevel = false;
+    bool wall = false;  // --wall: level and level1 hold half the wall thickness, mm
     bool graded = false;  // density or level changes linearly along axis `grade`
     int grade = 0;
     double cell[3] = {10, 10, 10};  // box and trimmed shapes
