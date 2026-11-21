@@ -127,8 +127,20 @@ struct Shape {
     double cellSize[3] = {10, 10, 10};  // box: cell size per axis, mm
     int cellGrade = -1;                 // box: the axis whose cell length changes, -1: none
     double cellEnd = 0;                 // box: the cell length at the far end of that axis
+    int slabAxis = -1;                  // box: plates or buffers on the faces across this axis
+    double slab[2] = {0, 0};            // their thickness at the start and the end of it, mm
 
     bool bent() const { return kind == ShapeKind::Tube || kind == ShapeKind::TorusShell; }
+
+    // Name of face F = 2 * axis + side of the (parameter) box, where a cut
+    // face lies: x-, x+, ... for the box; inner, outer, bottom, top for the
+    // tube and torus shell ("" for the faces where they wrap around).
+    const char* faceName(int F) const {
+        static const char* const box[6] = {"x-", "x+", "y-", "y+", "z-", "z+"};
+        static const char* const bentNames[6] = {"inner", "outer", "", "", "bottom", "top"};
+        if (kind == ShapeKind::TorusShell && F >= 4) return "";
+        return bent() ? bentNames[F] : box[F];
+    }
     bool mapped() const { return bent() || (kind == ShapeKind::Box && cellGrade >= 0); }
     bool trimmed() const {
         return kind == ShapeKind::Cylinder || kind == ShapeKind::Sphere || kind == ShapeKind::Torus;

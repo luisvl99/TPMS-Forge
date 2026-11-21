@@ -72,6 +72,18 @@ Property report of a tube, printed and written as JSON:
 build/tpms --shape tube --radius 10 20 --height 20 --cells 1 8 2 --report -o tube.json
 ```
 
+Fluid domain with 10 mm inlet and outlet buffers along x, for CFD:
+
+```bash
+build/tpms --part void --buffers x 10 -o channel_fluid.step
+```
+
+Sandwich panel: the lattice with 1.5 mm plates on top and bottom:
+
+```bash
+build/tpms --plates z 1.5 -o panel.step
+```
+
 Run `build/tpms --help` for all options. Run `build/tpms --list` for all surface types.
 
 ## Surface types
@@ -113,6 +125,29 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 - No grading.
 
 `--shift S` (or `Sx Sy Sz`, in cells, any shape) moves the lattice, so the faces cut it elsewhere: for example away from thin slivers, or with a node at the center. `python tools/check_step.py --periodic cell.step` compares the faces on opposite sides of a STEP file in OpenCASCADE (area and vertices).
+
+## Plates and buffers
+
+For the box, a slab can be fused onto the faces at the start and end of one axis:
+
+- `--plates x|y|z T [T1]` (with `--part solid`): solid plates, T mm at the start of the axis and T1 at the end (0 for none). Sandwich panels, walls of a heat exchanger.
+- `--buffers x|y|z L [L1]` (with `--part void`): empty buffer zones before and after the lattice, fused with the fluid, so the flow can develop: inlet and outlet regions for CFD. A sheet's two channels meet in a buffer, so the fluid is one solid.
+
+The slabs lie outside the lattice box, which keeps its size. In smooth STEP, the cut face under a slab becomes its complement (what the slab still shows to the other side), and the slab adds its outer face and four side faces, all planes. Reported solid fractions are of the lattice box; the volume check includes the slabs. They work with STL and faceted STEP too, not with `--unit-cell` or `--cell-grade`.
+
+## Names in the STEP file
+
+Solids and faces carry names, to pick boundaries in CAD, CFD and FEA:
+
+| Name | What |
+|---|---|
+| `solid`, `fluid`, `fluid A`, `fluid B` | solids: the part; a sheet's fluid channels are A (f > c) and B (f < −c). More pieces get `2`, `3`, ... |
+| `wall`, `wall A`, `wall B` | walls between solid and fluid; on a sheet, A and B tell which channel they face |
+| `x-`, `x+`, `y-`, `y+`, `z-`, `z+` | box faces (the outer faces of plates and buffers too: the inlet of `--buffers x` is `x-`) |
+| `inner`, `outer`, `bottom`, `top` | tube and torus shell faces |
+| `side`, `bottom`, `top`, `surface` | trimmed shapes (faceted STEP) |
+
+The names are written on the STEP items (`MANIFOLD_SOLID_BREP`, `ADVANCED_FACE`). Readers differ in what they import: OpenCASCADE reads them with `read.stepcaf.subshapes.name` on; a single solid often takes the file (product) name instead.
 
 ## Property report
 
@@ -277,5 +312,6 @@ For a tube or torus shell, the same steps run in the parameter box (one unit per
 - **Curved shapes, phase 2 (done):** smooth STEP for the tube and torus shell, with exact cylinder, torus and plane caps.
 - **Graded lattices and property report (done):** graded solid fraction or level along an axis, graded cell size in a box, and the report.
 - **Unit cell (done):** periodic cells for homogenization, lattice offset.
-- **Next:** CFD domains (skins, inlet and outlet buffers); custom formulas and more surfaces.
+- **Names, plates and buffers (done):** named solids and faces; plates and inlet/outlet buffers on the box.
+- **Next:** test the names in NX; faster patch search; custom formulas and more surfaces.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.

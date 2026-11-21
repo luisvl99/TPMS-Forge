@@ -84,6 +84,9 @@ add_test(NAME smooth-torus-shell COMMAND tpms --shape torus-shell --radius 4 10 
 add_test(NAME smooth-graded COMMAND tpms --cell 5 --cells 3 2 2 --cell-grade x 10 --density 0.3 0.15 --grade x -o ${CMAKE_BINARY_DIR}/test-graded.step)
 # Unit cell: exit 1 if opposite faces do not match.
 add_test(NAME unit-cell COMMAND tpms --unit-cell --type diamond --cell 8 10 12 --shift 0.25 0 0.1 -o ${CMAKE_BINARY_DIR}/test-cell.step)
+# Plates and buffers: exit 1 if the volume (with the slabs) does not match.
+add_test(NAME smooth-plates COMMAND tpms --plates z 1 2 -o ${CMAKE_BINARY_DIR}/test-plates.step)
+add_test(NAME smooth-buffers COMMAND tpms --part void --buffers x 5 -o ${CMAKE_BINARY_DIR}/test-buffers.step)
 add_test(NAME report COMMAND tpms --shape tube --radius 10 20 --height 10 --cells 1 6 1 --report -o ${CMAKE_BINARY_DIR}/test-report.json)
 # Every shape as a closed STL mesh (exit 1 if not closed, 2 if empty).
 add_test(NAME shape-tube COMMAND tpms --shape tube --radius 10 20 --height 20 --cells 1 8 2 --res 12 -o ${CMAKE_BINARY_DIR}/test-tube.stl)

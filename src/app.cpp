@@ -52,6 +52,9 @@ struct Settings {
     int cellGrade = 0;
     float cellEnd = 20;
     bool unitCell = false;      // box: a periodic cell for homogenization
+    bool slabs = false;         // box: plates (solid) or buffers (void) across `slabAxis`
+    int slabAxis = 2;
+    float slab[2] = {1, 1};     // at the start and the end of that axis, mm
     float shift[3] = {0, 0, 0};  // offset of the lattice, in cells
     int shape = kBox;
     bool cubic = true;
@@ -108,6 +111,8 @@ std::vector<std::string> geometryArgs(const Settings& s) {
     }
     if (s.shape == kBox && s.cellGraded) a.insert(a.end(), {"--cell-grade", axes[s.cellGrade], num(s.cellEnd)});
     if (s.shape == kBox && s.unitCell) a.push_back("--unit-cell");
+    if (s.shape == kBox && s.slabs)
+        a.insert(a.end(), {s.part ? "--buffers" : "--plates", axes[s.slabAxis], num(s.slab[0]), num(s.slab[1])});
     if (s.shift[0] || s.shift[1] || s.shift[2]) {
         a.push_back("--shift");
         const bool same = s.shift[0] == s.shift[1] && s.shift[1] == s.shift[2];
@@ -341,16 +346,38 @@ Preview buildPreview(const std::vector<std::string>& args) {
                         const Vec3 q = at(i, j);
                         g[size_t(j) * size_t(nu + 1) + size_t(i)] = open(q.x, q.y, q.z);
                     }
-                const Vec3 ns[3] = {n, n, n};
+                // A plate or buffer here covers the face: show what it leaves
+                // open (the face's complement, facing into the box), and the slab.
+                const double thick = shape.slabAxis == a ? shape.slab[side] : 0;
+                const double flip = thick > 0 ? -1 : 1;
+                const Vec3 ns[3] = {n * flip, n * flip, n * flip};
+                if (thick > 0) color = solid ? kSolid : kBlue;
                 auto cell = [&](int i0, int j0, int i1, int j1, int i2, int j2) {
                     const Vec3 q[3] = {at(i0, j0), at(i1, j1), at(i2, j2)};
-                    const double gq[3] = {g[size_t(j0) * size_t(nu + 1) + size_t(i0)],
-                                          g[size_t(j1) * size_t(nu + 1) + size_t(i1)],
-                                          g[size_t(j2) * size_t(nu + 1) + size_t(i2)]};
-                    clipEmit(q, ns, gq, true);
+                    const double gq[3] = {flip * g[size_t(j0) * size_t(nu + 1) + size_t(i0)],
+                                          flip * g[size_t(j1) * size_t(nu + 1) + size_t(i1)],
+                                          flip * g[size_t(j2) * size_t(nu + 1) + size_t(i2)]};
+                    clipEmit(q, ns, gq, thick == 0);
                 };
                 for (int j = 0; j < nv; ++j)
                     for (int i = 0; i < nu; ++i) cell(i, j, i + 1, j, i + 1, j + 1), cell(i, j, i + 1, j + 1, i, j + 1);
+                if (thick > 0) {  // the slab: its outer face and four sides, as quads
+                    auto quad = [&](Vec3 p0, Vec3 p1, Vec3 p2, Vec3 p3, Vec3 normal) {
+                        emitMm(p0, normal), emitMm(p1, normal), emitMm(p2, normal);
+                        emitMm(p0, normal), emitMm(p2, normal), emitMm(p3, normal);
+                    };
+                    const Vec3 d = n * thick;
+                    const Vec3 c00 = at(0, 0), c10 = at(nu, 0), c11 = at(nu, nv), c01 = at(0, nv);
+                    quad(c00 + d, c10 + d, c11 + d, c01 + d, n);
+                    const Vec3 corner[4] = {c00, c10, c11, c01};
+                    for (int k = 0; k < 4; ++k) {
+                        const Vec3 p0 = corner[k], p1 = corner[(k + 1) % 4];
+                        Vec3 side = cross(p1 - p0, n);  // out of the slab, either way: point it away from the center
+                        const Vec3 mid = (c00 + c11) * 0.5;
+                        if (dot(side, (p0 + p1) * 0.5 - mid) < 0) side = side * -1.0;
+                        quad(p0, p1, p1 + d, p0 + d, side);
+                    }
+                }
             }
     }
     if (p.tris.empty()) {
@@ -513,6 +540,8 @@ Settings fromOptions(const Options& o) {
     s.cellGraded = o.shape.cellGrade >= 0;
     if (s.cellGraded) s.cellGrade = o.shape.cellGrade, s.cellEnd = float(o.shape.cellEnd);
     s.unitCell = o.unitCell;
+    s.slabs = o.plates || o.buffers;
+    if (s.slabs) s.slabAxis = o.shape.slabAxis, s.slab[0] = float(o.shape.slab[0]), s.slab[1] = float(o.shape.slab[1]);
     if (o.unitCell) s.exact = false, s.minFragment = 0.01f;  // implied by the unit cell, not chosen
     for (int a = 0; a < 3; ++a) s.shift[a] = float(o.shift[a]);
     for (int a = 0; a < 3; ++a) s.cell[a] = float(o.cell[a]), s.cells[a] = o.cells[a];
@@ -687,13 +716,16 @@ int main(int argc, char** argv) {
                 ImGui::InputFloat3("Cell size (mm)", s.cell, "%.2f");
             }
             if (s.shape == kBox) {
+                // Unit cell, graded cell size and plates / buffers exclude each other.
+                ImGui::BeginDisabled(s.cellGraded || s.slabs);
                 if (ImGui::Checkbox("Unit cell (periodic)", &s.unitCell) && s.unitCell)
                     s.cells[0] = s.cells[1] = s.cells[2] = 1;
+                ImGui::EndDisabled();
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("A periodic cell for FEA homogenization: opposite faces match exactly,\n"
                                       "edges are exact and every piece is kept. More cells give a supercell.");
                 ImGui::InputInt3("Cells x y z", s.cells);
-                ImGui::BeginDisabled(s.unitCell);
+                ImGui::BeginDisabled(s.unitCell || s.slabs);
                 ImGui::Checkbox("Graded cell size", &s.cellGraded);
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered())
@@ -703,6 +735,20 @@ int main(int argc, char** argv) {
                     ImGui::Combo("Cell axis", &s.cellGrade, "x\0y\0z\0");
                     ImGui::InputFloat("Cell size at end (mm)", &s.cellEnd, 1, 5, "%.2f");
                     s.cellEnd = std::max(0.1f, s.cellEnd);
+                }
+                ImGui::BeginDisabled(s.unitCell || s.cellGraded);
+                ImGui::Checkbox(s.part ? "Buffers (inlet / outlet)" : "Plates", &s.slabs);
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(s.part ? "Empty fluid zones before and after the lattice along an axis,\n"
+                                               "so the flow can develop: inlet and outlet regions for CFD."
+                                             : "Solid plates on the faces at both ends of an axis, fused with\n"
+                                               "the lattice: sandwich panels and walls.");
+                if (s.slabs) {
+                    ImGui::Combo("Across", &s.slabAxis, "x\0y\0z\0");
+                    ImGui::InputFloat2(s.part ? "Length start / end (mm)" : "Thickness start / end (mm)", s.slab, "%.2f");
+                    s.slab[0] = std::max(0.0f, s.slab[0]), s.slab[1] = std::max(0.0f, s.slab[1]);
+                    if (s.slab[0] + s.slab[1] <= 0) s.slab[1] = 1;
                 }
             }
         }

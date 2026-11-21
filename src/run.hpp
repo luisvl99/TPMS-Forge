@@ -35,6 +35,7 @@ struct Options {
     std::vector<std::string> outputs;
     bool report = false;    // print the property report
     bool unitCell = false;  // box: a periodic cell (exact edges, every piece kept)
+    bool plates = false, buffers = false;  // box: slabs (shape.slab) on a solid, or on the fluid
     double shift[3] = {0, 0, 0};  // offset of the lattice, in cells
 };
 
@@ -55,7 +56,14 @@ Lattice makeLattice(const Options& o);
 // step of margin.
 Grid gridOf(const Options& o, int res);
 
-// Closed mesh of the exported region in mm (mapped shapes mapped to mm).
+// The grid of gridOf, with whole steps added for plates or buffers.
+Grid meshGrid(const Options& o, int res);
+
+// Volume of the plates or buffers, mm^3.
+double slabVolume(const Options& o);
+
+// Closed mesh of the exported region in mm (mapped shapes mapped to mm),
+// with plates or buffers.
 Mesh meshSolid(const Options& o, const Lattice& lat, int res, size_t* droppedDegenerate = nullptr);
 
 // Volume of the part's shape, mm^3.

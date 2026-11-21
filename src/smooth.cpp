@@ -287,7 +287,10 @@ using Loop = std::vector<std::pair<int, bool>>;  // (edge, runs from a to b)
 
 struct Face {
     int patch = -1;                          // B-spline patch
-    int box = -1;                            // box face of a planar cap
+    int wall = -1;                           // the wall it lies on, or the one it faces
+    int box = -1;                            // box face of a cap
+    Vec3 origin, normal;                     // a plane given directly (normal not zero)
+    std::string name;                        // when not named by the above
     std::vector<std::vector<Vec3>> ctrl;     // trimmed B-spline of a merged region
     std::vector<double> knots[2];            // its knots along u and v
     std::vector<Loop> loops;                 // first loop is the outer one
@@ -413,7 +416,7 @@ public:
         for (size_t k = 0; k < patches_.size(); ++k) {
             maxErr = std::max(maxErr, errs[k]);
             Face f;
-            f.patch = int(k);
+            f.patch = int(k), f.wall = patches_[k].wall;
             Loop loop;
             for (int c = 0; c < 4; ++c)
                 loop.push_back({patches_[k].e[size_t(c)], edges_[size_t(patches_[k].e[size_t(c)])].a == patches_[k].v[size_t(c)]});
@@ -723,6 +726,28 @@ public:
 
     std::vector<long> write(StepFile& st, const std::vector<std::vector<int>>& shells) const {
         std::unordered_map<int, long> vertexId, edgeId, surfaceId;
+        // Names for CAD and CFD setup: faces by what they are (wall, or the
+        // face of the shape they lie on), solids by part and fluid channel.
+        auto quote = [](const std::string& s) { return "'" + s + "'"; };
+        const bool sheet = lat_.form == Form::Sheet;
+        auto faceName = [&](const Face& f) -> std::string {
+            if (!f.name.empty()) return f.name;
+            if (f.wall >= 0) return sheet ? (f.wall ? "wall B" : "wall A") : "wall";
+            return f.box >= 0 ? shape_.faceName(f.box) : "";
+        };
+        std::vector<std::string> names;
+        std::unordered_map<std::string, int> seen;
+        for (const auto& shell : shells) {
+            int walls = 0;  // bit per wall the shell touches
+            for (int fi : shell)
+                if (faces_[size_t(fi)].wall >= 0) walls |= 1 << faces_[size_t(fi)].wall;
+            std::string n = lat_.part == Part::Solid ? "solid"
+                            : sheet && walls == 1   ? "fluid A"
+                            : sheet && walls == 2   ? "fluid B"
+                                                    : "fluid";
+            const int k = ++seen[n];
+            names.push_back(k == 1 ? n : n + " " + std::to_string(k));
+        }
 
         auto point = [&](Vec3 p) { return st.add("CARTESIAN_POINT(''," + triple(p) + ")"); };
         auto bspline = [&](const std::vector<Vec3>& ctrl, const std::vector<double>& U) {
@@ -763,7 +788,12 @@ public:
                                       ref(st.add("DIRECTION(''," + triple(z) + ")")) + "," +
                                       ref(st.add("DIRECTION(''," + triple(x) + ")")) + ")"));
                 };
-                if (!flatCap(f.box)) {  // radial cap of a curved shape, around z
+                if (dot(f.normal, f.normal) > 0) {  // an axis-aligned plane given directly
+                    Vec3 x;
+                    for (int k = 0; k < 3; ++k)
+                        if (f.normal[k] != 0) x[(k + 1) % 3] = 1;
+                    surface = st.add("PLANE(''," + placement(mm(f.origin), f.normal, x) + ")");
+                } else if (!flatCap(f.box)) {  // radial cap of a curved shape, around z
                     const std::string ax = placement({}, {0, 0, 1}, {1, 0, 0}), r = real(side ? shape_.r1 : shape_.r0);
                     surface = shape_.kind == ShapeKind::Tube
                                   ? st.add("CYLINDRICAL_SURFACE(''," + ax + "," + r + ")")
@@ -817,10 +847,11 @@ public:
                                             ref(loop(f.loops[k])) + ",.T.)"));
                 // The inner radial cap faces against its surface's normal.
                 const bool against = f.box == 0 && !flatCap(0);
-                faces.push_back(st.add("ADVANCED_FACE(''," + refList(bounds) + "," + ref(surface) +
-                                       (against ? ",.F.)" : ",.T.)")));
+                faces.push_back(st.add("ADVANCED_FACE(" + quote(faceName(f)) + "," + refList(bounds) + "," +
+                                       ref(surface) + (against ? ",.F.)" : ",.T.)")));
             }
-            solids.push_back(st.add("MANIFOLD_SOLID_BREP(''," + ref(st.add("CLOSED_SHELL(''," + refList(faces) + ")")) + ")"));
+            solids.push_back(st.add("MANIFOLD_SOLID_BREP(" + quote(names[solids.size()]) + "," +
+                                    ref(st.add("CLOSED_SHELL(''," + refList(faces) + ")")) + ")"));
         }
         return solids;
     }
@@ -1143,6 +1174,7 @@ private:
                                                      axis * h[size_t(a * Kv + b)];
                 }
             out.knots[0] = U, out.knots[1] = V;
+            out.wall = patches_[size_t(members[0])].wall;
             break;
         }
 
@@ -1548,15 +1580,82 @@ private:
             perim.push_back({pos, int(id)});
         }
         std::sort(perim.begin(), perim.end());
+        // A slab (plate or buffer) on this face covers it: the cap turns into
+        // its complement on the face, facing the other way. That takes the
+        // outside parts of the perimeter, backwards, and the same patch
+        // boundaries in the same direction (they now border it from the
+        // other side, with the normal flipped).
+        const bool slab = shape_.slabAxis == a && shape_.slab[side] > 0;
         for (size_t k = 0; k < perim.size(); ++k) {
             const int x = perim[k].second, y = perim[(k + 1) % perim.size()].second;
             const Vec3 m = (verts_[size_t(x)].p + verts_[size_t(y)].p) * 0.5;
-            if (lat_(m.x, m.y, m.z) >= 0) continue;
+            if ((lat_(m.x, m.y, m.z) < 0) == slab) continue;
             const int e = edge(x, y, -1);
             sampleLine(edges_[size_t(e)]);
-            de.push_back({x, y, e, edges_[size_t(e)].a == x});
+            if (slab) de.push_back({y, x, e, edges_[size_t(e)].a == y});
+            else de.push_back({x, y, e, edges_[size_t(e)].a == x});
         }
-        return closeCaps(F, de, false, error);
+        if (!closeCaps(F, de, false, error, slab)) return false;
+        if (slab) addSlab(F, perim);
+        return true;
+    }
+
+    // The slab on box face F: its outer face, and a strip on the plane of
+    // each side face. Strip k runs along side k of F, from corner k to corner
+    // k + 1 (counter-clockwise about F's outward normal) through the
+    // perimeter vertices there, then out to the outer face and back.
+    void addSlab(int F, const std::vector<std::pair<double, int>>& perim) {
+        const int a = F / 2, side = F % 2;
+        const int s = side ? (a + 1) % 3 : (a + 2) % 3, t = side ? (a + 2) % 3 : (a + 1) % 3;
+        const double S = L_[s], T = L_[t], at[5] = {0, S, S + T, 2 * S + T, 2 * S + 2 * T};
+        const double eps = 1e-9 * (S + T), thick = shape_.slab[side];
+        Vec3 n;  // F's outward normal: the slab lies that way
+        n[a] = side ? 1.0 : -1.0;
+        int c[4], o[4];
+        for (int k = 0; k < 4; ++k) {
+            const int bits = side << a | int(k == 1 || k == 2) << s | int(k >= 2) << t;
+            c[k] = cornerVertex(bits);
+            const uint64_t key = (uint64_t(13) << 56) | uint64_t(F << 2 | k);
+            const auto it = vertOf_.find(key);
+            if (it != vertOf_.end()) o[k] = it->second;
+            else {
+                o[k] = int(verts_.size());
+                verts_.push_back({verts_[size_t(c[k])].p + n * thick, 0, key});
+                vertOf_.emplace(key, o[k]);
+            }
+        }
+        auto line = [&](int x, int y, Loop& loop) {
+            const int e = edge(x, y, -1);
+            sampleLine(edges_[size_t(e)]);
+            loop.push_back({e, edges_[size_t(e)].a == x});
+        };
+        auto plane = [&](Loop loop, Vec3 origin, Vec3 normal, double area, const std::string& name) {
+            Face f;
+            f.loops.push_back(loop);
+            f.origin = origin, f.normal = normal, f.name = name;
+            f.volume = normal.x * shape_.flux(origin) * area;  // flux (Phi, 0, 0); Phi = x on the box
+            faces_.push_back(f);
+        };
+        Loop outer;
+        for (int k = 0; k < 4; ++k) line(o[k], o[(k + 1) % 4], outer);
+        plane(outer, verts_[size_t(o[0])].p, n, S * T, shape_.faceName(F));
+        for (int k = 0; k < 4; ++k) {
+            std::vector<int> along = {c[k]};
+            for (const auto& [pos, v] : perim)
+                if (pos > at[k] + eps && pos < at[k + 1] - eps) along.push_back(v);
+            const int next = (k + 1) % 4;
+            along.push_back(c[next]);
+            Loop loop;
+            for (size_t q = 0; q + 1 < along.size(); ++q) line(along[q], along[q + 1], loop);
+            line(c[next], o[next], loop);
+            line(o[next], o[k], loop);
+            line(o[k], c[k], loop);
+            // Side k of F lies on the face across t (k = 0, 2) or s (k = 1, 3).
+            const int axis = k % 2 ? s : t, G = 2 * axis + int(k == 1 || k == 2);
+            Vec3 normal;
+            normal[axis] = G % 2 ? 1.0 : -1.0;
+            plane(loop, verts_[size_t(c[k])].p, normal, thick * (k % 2 ? T : S), shape_.faceName(G));
+        }
     }
 
     // Walks directed edges on box face F into loops and adds the cap faces:
@@ -1564,7 +1663,9 @@ private:
     // in the smallest outer loop around it. Loops are measured in the
     // parameter box, or in mm for a flat cap welded across the seam (its
     // parameter rectangle is cut there).
-    bool closeCaps(int F, const std::vector<Directed>& de, bool inMm, std::string& error) {
+    // With `flip`, the faces face against F's outward normal (the complement
+    // of the cap under a slab): their outer loops run the other way.
+    bool closeCaps(int F, const std::vector<Directed>& de, bool inMm, std::string& error, bool flip = false) {
         const int a = F / 2, side = F % 2;
         const int s = side ? (a + 1) % 3 : (a + 2) % 3, t = side ? (a + 2) % 3 : (a + 1) % 3;  // e_s x e_t = outward
         Vec3 nrm, e1{1, 0, 0};
@@ -1624,12 +1725,19 @@ private:
         };
         // Volumes need parameter coordinates; the flat caps welded in mm
         // are never on face 1, so they have none.
+        if (flip)
+            for (double& ar : areas) ar = -ar;
         std::unordered_map<size_t, size_t> faceOf;
         for (size_t k = 0; k < loops.size(); ++k) {
             if (areas[k] <= 0) continue;
             faceOf[k] = faces_.size();
             Face f;
             f.box = F;
+            if (flip) {  // a plane facing into the box, named after the wall its patch edges belong to
+                f.box = -1;
+                f.origin[a] = side ? L_[a] : 0.0;
+                f.normal[a] = side ? -1.0 : 1.0;
+            }
             f.loops.push_back(loops[k]);
             f.volume = inMm ? 0 : capVolume(F, polys[k]);
             faces_.push_back(f);
@@ -1646,6 +1754,16 @@ private:
             Face& f = faces_[faceOf[best]];
             f.loops.push_back(loops[k]);
             f.volume += inMm ? 0 : capVolume(F, polys[k]);
+        }
+        for (const auto& [k, fi] : faceOf) {
+            if (!flip) continue;
+            Face& f = faces_[fi];
+            int walls = 0;
+            for (const Loop& l : f.loops)
+                for (const auto& [e, same] : l)
+                    if (edges_[size_t(e)].wall >= 0) walls |= 1 << edges_[size_t(e)].wall;
+            if (walls == 1 || walls == 2) f.wall = walls - 1;
+            else f.name = "wall";
         }
         return true;
     }

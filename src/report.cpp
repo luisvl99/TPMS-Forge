@@ -86,11 +86,9 @@ Report makeReport(const Options& o, const Lattice& lat, int res) {
     std::vector<std::string> names;
     std::function<int(Vec3)> facesAt;
     if (!s.trimmed()) {
-        const char* box[6] = {"x-", "x+", "y-", "y+", "z-", "z+"};
-        const char* bent[6] = {"inner", "outer", "", "", "bottom", "top"};
-        for (int f = 0; f < 6; ++f) names.push_back(s.bent() ? bent[f] : box[f]);
+        for (int f = 0; f < 6; ++f) names.push_back(s.faceName(f));
         for (int a = 0; a < 3; ++a)
-            if (!(grid.periodic >> a & 1)) r.opposite.push_back({names[size_t(2 * a)], names[size_t(2 * a + 1)]});
+            if (!names[size_t(2 * a)].empty()) r.opposite.push_back({names[size_t(2 * a)], names[size_t(2 * a + 1)]});
         facesAt = [&](Vec3 p) {
             int m = 0;
             for (int a = 0; a < 3; ++a)
@@ -251,6 +249,7 @@ std::vector<std::pair<std::string, std::string>> reportRows(const Report& r, con
             th[k].fluid.empty() ? "no" : r.channels == 1 ? "yes" : joined(th[k].fluid, " and ").c_str());
     if (r.cavities) row("Cavities", "%zu inner shell(s), not exported", r.cavities);
     row("Accuracy", "from meshes at %d steps per cell: volumes and areas within about 1%%", r.res);
+    if (o.shape.slabAxis >= 0) row("Note", "for the lattice box: %s are not included", o.plates ? "plates" : "buffers");
     if (r.thickness[0] > 0 && r.thickness[0] < r.step)
         row("Note", "walls down to %.3g mm are thinner than the mesh step (%.3g mm): piece counts and the solid "
                     "volume can be off there. Raise --res.", r.thickness[0], r.step);

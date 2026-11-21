@@ -67,7 +67,8 @@ std::string quoted(const std::string& s) {
     return out + "'";
 }
 
-long writeSolid(StepFile& st, const Mesh& m) {
+long writeSolid(StepFile& st, const Mesh& m, const std::string& name,
+                const std::function<std::string(size_t)>& triangleName) {
     std::vector<long> point(m.vertices.size()), vertex(m.vertices.size());
     for (size_t i = 0; i < m.vertices.size(); ++i) {
         point[i] = st.add("CARTESIAN_POINT(''," + triple(m.vertices[i]) + ")");
@@ -98,7 +99,8 @@ long writeSolid(StepFile& st, const Mesh& m) {
 
     std::vector<long> faces;
     faces.reserve(m.triangles.size());
-    for (const auto& t : m.triangles) {
+    for (size_t ti = 0; ti < m.triangles.size(); ++ti) {
+        const auto& t = m.triangles[ti];
         const Vec3 &a = m.vertices[t[0]], &b = m.vertices[t[1]], &c = m.vertices[t[2]];
         const Vec3 n = cross(b - a, c - a);
         const long normal = st.add("DIRECTION(''," + triple(n * (1.0 / norm(n))) + ")");
@@ -115,18 +117,24 @@ long writeSolid(StepFile& st, const Mesh& m) {
         }
         const long loopId = st.add(loop + "))");
         const long bound = st.add("FACE_OUTER_BOUND(''," + ref(loopId) + ",.T.)");
-        faces.push_back(st.add("ADVANCED_FACE('',(" + ref(bound) + ")," + ref(plane) + ",.T.)"));
+        const std::string faceName = triangleName ? quoted(triangleName(ti)) : "''";
+        faces.push_back(st.add("ADVANCED_FACE(" + faceName + ",(" + ref(bound) + ")," + ref(plane) + ",.T.)"));
     }
     const long shell = st.add("CLOSED_SHELL(''," + refList(faces) + ")");
-    return st.add("MANIFOLD_SOLID_BREP(''," + ref(shell) + ")");
+    return st.add("MANIFOLD_SOLID_BREP(" + quoted(name) + "," + ref(shell) + ")");
 }
 
 }  // namespace
 
-bool writeStep(const std::string& path, const std::vector<Mesh>& parts, const std::string& name) {
+bool writeStep(const std::string& path, const std::vector<Mesh>& parts, const std::string& name,
+               const std::vector<std::string>& solidNames, const TriangleName& triangleName) {
     return writeStepFile(path, name, [&](StepFile& st) {
         std::vector<long> solids;
-        for (const Mesh& m : parts) solids.push_back(writeSolid(st, m));
+        for (size_t k = 0; k < parts.size(); ++k) {
+            std::function<std::string(size_t)> faceName;
+            if (triangleName) faceName = [&, k](size_t t) { return triangleName(k, t); };
+            solids.push_back(writeSolid(st, parts[k], k < solidNames.size() ? solidNames[k] : "", faceName));
+        }
         return solids;
     });
 }

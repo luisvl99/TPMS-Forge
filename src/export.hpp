@@ -14,8 +14,11 @@ namespace tpms {
 bool writeStl(const std::string& path, const std::vector<Mesh>& parts);
 
 // Faceted STEP AP214. Each part becomes one MANIFOLD_SOLID_BREP with one
-// planar ADVANCED_FACE per triangle. Units: mm.
-bool writeStep(const std::string& path, const std::vector<Mesh>& parts, const std::string& name);
+// planar ADVANCED_FACE per triangle. Units: mm. Optional names: one per
+// part (solid), and per triangle (part index, triangle index).
+using TriangleName = std::function<std::string(size_t part, size_t triangle)>;
+bool writeStep(const std::string& path, const std::vector<Mesh>& parts, const std::string& name,
+               const std::vector<std::string>& solidNames = {}, const TriangleName& triangleName = {});
 
 struct SmoothReport {
     size_t faces = 0, solids = 0, fragments = 0, cavities = 0;
