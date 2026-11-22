@@ -26,6 +26,8 @@ add_executable(tpms-forge src/main.cpp)
 target_link_libraries(tpms-forge PRIVATE tpmscore)
 if(WIN32)
   target_sources(tpms-forge PRIVATE src/tpms.rc)  # the icon
+  # The resource compiler does not report the .ico it reads.
+  set_source_files_properties(src/tpms.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/src/tpms.ico)
 endif()
 set(tpms_targets tpmscore tpms-forge)
 

@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TPMS = ROOT / "build" / ("tpms-forge.exe" if os.name == "nt" else "tpms-forge")
 WORK = ROOT / "build" / "images"
 BOTTOM, TOP = (0.02, 0.03, 0.07), (0.10, 0.13, 0.24)  # background gradient
-PALETTE = [(0.13, 0.83, 0.93), (0.39, 0.40, 0.95), (0.93, 0.28, 0.60)]  # cyan, indigo, pink
+SOLID = (0.66, 0.73, 0.83)  # steel blue-grey
 FLUIDS = [(0.22, 0.74, 0.97), (0.98, 0.45, 0.09)]  # channel A, channel B
 
 
@@ -43,18 +43,14 @@ def model(name, args):
     return normals.GetOutput()
 
 
-def paint(mesh, direction, palette=PALETTE, per_solid=False):
-    """Point colors: a ramp through the palette along the direction, or one
-    palette color per solid, darker towards the start of the direction."""
-    pts = vtk_to_numpy(mesh.GetPoints().GetData())
-    t = pts @ np.asarray(direction, float)
-    t = (t - t.min()) / max(np.ptp(t), 1e-12)
-    if per_solid:
-        solid = vtk_to_numpy(mesh.GetPointData().GetArray("RegionId")) % len(palette)
-        rgb = np.asarray(palette)[solid] * (0.6 + 0.4 * t)[:, None]
-    else:
-        stops = np.linspace(0, 1, len(palette))
-        rgb = np.stack([np.interp(t, stops, [c[k] for c in palette]) for k in range(3)], axis=1)
+def paint(mesh, colors=(SOLID,), shade=None):
+    """Point colors: one color per solid, in turn; with shade (a direction),
+    darker towards the start of the direction."""
+    solid = vtk_to_numpy(mesh.GetPointData().GetArray("RegionId")) % len(colors)
+    rgb = np.asarray(colors)[solid]
+    if shade is not None:
+        t = vtk_to_numpy(mesh.GetPoints().GetData()) @ np.asarray(shade, float)
+        rgb = rgb * (0.6 + 0.4 * (t - t.min()) / max(np.ptp(t), 1e-12))[:, None]
     colors = numpy_to_vtk((rgb * 255).astype(np.uint8), deep=1)
     colors.SetName("colors")
     mesh.GetPointData().SetScalars(colors)
@@ -143,14 +139,11 @@ def font(names, size):
 def banner():
     # name, tpms-forge options, paint options, label, size, turn
     models = [
-        ("fluids", "--part void --density 0.45 --res 32", dict(direction=(0, 0, 1), palette=FLUIDS, per_solid=True),
+        ("fluids", "--part void --density 0.45 --res 32", dict(colors=FLUIDS, shade=(0, 0, 1)),
          "two fluid channels", 1.75, (0, 0, -30)),
-        ("sphere", "--shape sphere-shell --radius 15 25 --cells 1 12 5 --res 32", dict(direction=(0.3, 0, 1)),
-         "sphere shell", 2.25, (0, 0, 0)),
-        ("torus", "--shape torus-shell --radius 5 15 --major 40 --cells 1 24 6", dict(direction=(1, 0.4, 0.2)),
-         "torus shell", 2.3, (62, 0, 0)),
-        ("graded", "--density 0.1 0.4 --grade x --cells 4 2 2 --res 32", dict(direction=(1, 0, 0.2)),
-         "graded density", 2.3, (0, 0, 28)),
+        ("sphere", "--shape sphere-shell --radius 15 25 --cells 1 12 5 --res 32", {}, "sphere shell", 2.25, (0, 0, 0)),
+        ("torus", "--shape torus-shell --radius 5 15 --major 40 --cells 1 24 6", {}, "torus shell", 2.3, (62, 0, 0)),
+        ("graded", "--density 0.1 0.4 --grade x --cells 4 2 2 --res 32", {}, "graded density", 2.3, (0, 0, 28)),
     ]
     W, H = 2560, 1280  # twice the final size: smooth edges after scaling down
     actors, marks = [], []
@@ -183,7 +176,7 @@ def gradient(size):
 def cell_picture(name, args, side):
     """One cell of a lattice, seen from a corner, on a transparent square of the given side."""
     mesh = model(name, args)
-    paint(mesh, (0.3, 0.2, 1))
+    paint(mesh)
     img, _ = render([actor(mesh, (0, 0, 0), 2, (0, 0, 0))], (1024, 1024), (6, -6, 5), (0, 0, 0), 22, False)
     img = img.crop(img.getbbox())
     scale = side / max(img.size)
