@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <map>
 
 namespace tpms {
@@ -50,6 +51,11 @@ Shape (default box)
                         connect to the next cell). No grading.
   --shift S [Sy Sz]     Offset of the lattice in cells (default 0): moves
                         where the faces of the shape cut the cells.
+  --rotate AX AY AZ     Box and trimmed shapes: turns the lattice about the
+                        origin by AX degrees about x, then AY about y, then
+                        AZ about z. For printing without overhangs, or to
+                        line up the stiff directions with the loads. Smooth
+                        STEP keeps exact edges then (more faces).
   --plates x|y|z T [T1] box, solid: plates T mm thick on the faces at the
                         start and end of the axis (T1: at the end; 0: none),
                         fused with the lattice. Sandwich panels, walls.
@@ -74,7 +80,8 @@ Shape (default box)
                           torus-shell: radial, around the ring, around the tube
                           sphere-shell: radial, around, from south to north
   --radius R | R0 R1    tube, torus-shell, sphere-shell: inner and outer radius.
-                        cylinder, sphere: radius. torus: tube radius.
+                        cylinder, sphere: radius (sphere R0 R1: hollow).
+                        torus: tube radius.
   --height H            tube, cylinder: length along z.
   --major R             torus-shell, torus: from the axis to the tube center.
   --polar A0 A1         sphere-shell: where it starts and ends, in degrees
@@ -118,6 +125,13 @@ Output
                         viscosity in Pa s and density in kg/m^3 (default
                         water: 0.001, 998). Adds Reynolds numbers and
                         pressure drop estimates per fluid channel.
+  --sweep OPTION V1 V2 ...
+                        Batch: one run per value of OPTION (any option
+                        that takes one value: --density, --wall, --cell,
+                        --cells, --type, ...); V1 V2 ... or FROM:TO:STEP.
+                        Each run's files get the value in their name
+                        (x_density-0.2.step); a .csv report gets one line
+                        per run, with the value first.
   --list                List surface types.
   -h, --help            Show this help.
 
@@ -202,6 +216,7 @@ std::string triangleName(const Options& o, const Lattice& lat, const Grid& g, Ve
     if (s.trimmed()) {  // on the shape where its field, not the lattice's, is zero
         const double v = lat.value(m.x, m.y, m.z), lc = lat.levelAt(m.x, m.y, m.z);
         if (std::fabs(s.inside(m.x, m.y, m.z)) < std::fabs(lat.form == Form::Sheet ? std::fabs(v) - lc : v - lc)) {
+            if (s.kind == ShapeKind::Sphere && s.r0 > 0) return norm(m) < 0.5 * (s.r0 + s.r1) ? "inner" : "outer";
             if (s.kind != ShapeKind::Cylinder) return "surface";
             if (std::fabs(std::hypot(m.x, m.y) - s.r1) < std::fabs(std::fabs(m.z) - 0.5 * s.height)) return "side";
             return m.z < 0 ? "bottom" : "top";
@@ -332,6 +347,8 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
                        false;
         } else if (a == "--unit-cell") {
             o.unitCell = true;
+        } else if (a == "--rotate") {
+            if (numbers(args, i, o.rotate, 3) != 3) return error = "--rotate needs 3 angles in degrees", false;
         } else if (a == "--shift") {
             n = numbers(args, i, o.shift, 3);
             if (n != 1 && n != 3) return error = "--shift needs 1 or 3 numbers", false;
@@ -436,13 +453,25 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
     if (s.kind != ShapeKind::Box) {
         if (shell && !(radii == 2 && s.r0 > 0 && s.r1 > s.r0))
             return error = "--shape " + name + " needs --radius R0 R1 with 0 < R0 < R1", false;
-        if (!shell && !(radii == 1 && s.r1 > 0)) return error = "--shape " + name + " needs --radius R > 0", false;
+        const bool hollow = s.kind == ShapeKind::Sphere && radii == 2;
+        if (hollow && !(s.r0 > 0 && s.r1 > s.r0)) return error = "a hollow sphere needs --radius R0 R1 with 0 < R0 < R1", false;
+        if (!shell && !hollow && !(radii == 1 && s.r1 > 0))
+            return error = "--shape " + name + " needs --radius R > 0", false;
         if (needsHeight && !(s.height > 0)) return error = "--shape " + name + " needs --height > 0", false;
         if (!needsHeight && s.height) return error = "--height does not apply to --shape " + name, false;
         if (needsMajor && !(s.major > s.r1)) return error = "--shape " + name + " needs --major > the radius", false;
         if (!needsMajor && s.major) return error = "--major does not apply to --shape " + name, false;
     }
     if (polarGiven && s.kind != ShapeKind::SphereShell) return error = "--polar needs --shape sphere-shell", false;
+    if (o.rotate[0] || o.rotate[1] || o.rotate[2]) {
+        if (s.mapped() || o.unitCell)
+            return error = "--rotate works for the box (without --cell-grade or --unit-cell) and the trimmed shapes", false;
+        // ponytail: merged faces of a rotated lattice can fail strict CAD
+        // checks (a face's boundary crossing itself on its surface), so it
+        // keeps exact edges; a self-intersection check of the projected
+        // loops in merge() would let it merge.
+        o.exact = true;
+    }
     if (!(0 < polar[0] && polar[0] < polar[1] && polar[1] < 180))
         return error = "--polar needs 0 < A0 < A1 < 180 (degrees from the +z axis)", false;
     const double degree = kTwoPi / 360;
@@ -474,7 +503,7 @@ double autoTol(const Options& o) {
 Lattice makeLattice(const Options& o) {
     const Surface* surface = findSurface(o.type);
     Lattice lat;
-    lat.f = surface->f;
+    lat.f = surface->f, lat.grad = surface->grad;
     lat.form = o.form;
     lat.part = o.part;
     lat.shape = o.shape;
@@ -488,6 +517,16 @@ Lattice makeLattice(const Options& o) {
     };
     lat.level = levelAt(0);
     lat.wall = o.wall;
+    if (o.rotate[0] || o.rotate[1] || o.rotate[2]) {
+        // R = Rz Ry Rx turns the lattice; it is sampled at R^T p.
+        const double d = kTwoPi / 360, a = o.rotate[0] * d, b = o.rotate[1] * d, c = o.rotate[2] * d;
+        const double ca = std::cos(a), sa = std::sin(a), cb = std::cos(b), sb = std::sin(b), cc = std::cos(c),
+                     sc = std::sin(c);
+        lat.rotated = true;
+        lat.turn[0] = {cb * cc, cb * sc, -sb};
+        lat.turn[1] = {sa * sb * cc - ca * sc, sa * sb * sc + ca * cc, sa * cb};
+        lat.turn[2] = {ca * sb * cc + sa * sc, ca * sb * sc - sa * cc, ca * cb};
+    }
     if (o.graded) {
         const int a = lat.grade = o.grade;
         if (o.shape.trimmed()) lat.gradeFrom = -o.shape.half()[a], lat.gradeTo = o.shape.half()[a];
@@ -745,7 +784,86 @@ Pieces keepPieces(const Mesh& mesh, double minFragment) {
     return out;
 }
 
+namespace {
+
+// --sweep OPTION V1 V2 ... (or FROM:TO:STEP): one run per value, with
+// `OPTION value` after the other options (later options win). Output files
+// get the value in their name; .csv reports are joined into one, one line
+// per run, with the value in a first column.
+int sweep(const std::vector<std::string>& args, const Print& print) {
+    std::vector<std::string> rest, values;
+    std::string option;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] != "--sweep") {
+            rest.push_back(args[i]);
+            continue;
+        }
+        if (!option.empty() || i + 1 >= args.size() || args[i + 1].rfind("--", 0) != 0 || args[i + 1] == "--sweep")
+            return print("error: use one --sweep OPTION V1 V2 ... (or FROM:TO:STEP)"), 2;
+        option = args[++i];
+        double v;
+        while (i + 1 < args.size() && (args[i + 1][0] != '-' || number(args[i + 1], v))) {
+            const std::string t = args[++i];
+            double r[3];
+            char c1 = 0, c2 = 0;
+            if (std::sscanf(t.c_str(), "%lf%c%lf%c%lf", &r[0], &c1, &r[1], &c2, &r[2]) == 5 && c1 == ':' && c2 == ':') {
+                if (!(r[2] > 0) || (r[1] - r[0]) / r[2] > 1000) return print("error: --sweep range must be FROM:TO:STEP, step > 0"), 2;
+                for (double x = r[0]; x <= r[1] + 1e-9 * r[2]; x += r[2]) {
+                    char b[32];
+                    std::snprintf(b, sizeof b, "%g", std::fabs(x) < 1e-12 * r[2] ? 0.0 : x);
+                    values.push_back(b);
+                }
+            } else {
+                values.push_back(t);
+            }
+        }
+    }
+    if (values.empty()) return print("error: --sweep " + option + " needs values"), 2;
+    const std::string name = option.substr(2);
+    std::map<std::string, std::vector<std::string>> reports;  // joined .csv -> each run's
+    int rc = 0;
+    for (size_t k = 0; k < values.size(); ++k) {
+        std::string tag = "_" + name + "-" + values[k];
+        for (char& ch : tag)
+            if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '.' && ch != '-' && ch != '_') ch = '_';
+        std::vector<std::string> one = rest;
+        for (size_t i = 0; i + 1 < one.size(); ++i)
+            if (one[i] == "-o" || one[i] == "--out") {
+                const std::string file = withSuffix(one[i + 1], tag);
+                if (ext(one[i + 1]) == ".csv") reports[one[i + 1]].push_back(file);
+                one[++i] = file;
+            }
+        one.insert(one.end(), {option, values[k]});
+        say(print, "Sweep     : %s %s (%zu of %zu)", option.c_str(), values[k].c_str(), k + 1, values.size());
+        const int code = run(one, print);
+        if (code == 2) return 2;  // a usage error is the same for every value
+        rc = std::max(rc, code);
+        print("");
+    }
+    for (const auto& [joined, files] : reports) {
+        std::ofstream out(joined, std::ios::binary);
+        bool header = false;
+        for (size_t k = 0; k < files.size(); ++k) {
+            std::ifstream in(files[k], std::ios::binary);
+            std::string head, row;
+            if (!std::getline(in, head) || !std::getline(in, row)) continue;  // that run failed
+            if (!header) out << name << "," << head << "\n", header = true;
+            out << values[k] << "," << row << "\n";
+            in.close();
+            std::filesystem::remove(files[k]);
+        }
+        if (!out) say(print, "error: cannot write '%s'", joined.c_str()), rc = 1;
+        else say(print, "Wrote     : %s (%zu runs)", joined.c_str(), files.size());
+    }
+    return rc;
+}
+
+}  // namespace
+
 int run(const std::vector<std::string>& args, const Print& print) {
+    if (std::find(args.begin(), args.end(), "--sweep") != args.end() &&
+        std::find(args.begin(), args.end(), "--help") == args.end())
+        return sweep(args, print);
     for (const auto& a : args) {
         if (a == "-h" || a == "--help") {
             print(kUsage);
@@ -851,6 +969,7 @@ int run(const std::vector<std::string>& args, const Print& print) {
         char extra[64] = "";
         if (s.kind == ShapeKind::Cylinder) std::snprintf(extra, sizeof extra, ", height %g mm", s.height);
         if (s.kind == ShapeKind::Torus) std::snprintf(extra, sizeof extra, ", major radius %g mm", s.major);
+        if (s.r0 > 0) std::snprintf(extra, sizeof extra, ", hollow from radius %g mm", s.r0);
         say(print, "Shape     : %s, radius %g mm%s, trimmed from cells of %g x %g x %g mm", shapeName(s.kind), s.r1,
             extra, o.cell[0], o.cell[1], o.cell[2]);
     }
@@ -863,6 +982,9 @@ int run(const std::vector<std::string>& args, const Print& print) {
 
     if (o.shift[0] || o.shift[1] || o.shift[2])
         say(print, "Shift     : %g x %g x %g cells", o.shift[0], o.shift[1], o.shift[2]);
+    if (lat.rotated)
+        say(print, "Rotation  : %g, %g, %g degrees about x, y, z (in that order); exact edges", o.rotate[0],
+            o.rotate[1], o.rotate[2]);
     const auto t0 = std::chrono::steady_clock::now();
     bool ok = true;
     if (o.unitCell) {  // self-check: opposite faces must match

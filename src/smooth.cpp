@@ -385,15 +385,18 @@ public:
                             // folded quad then comes out flipped, and the
                             // closed-shell check sends the search to a finer
                             // grid. A trimmed shape's parameter box is too
-                            // distorted for that (sound quads twist there):
-                            // the cells around the edge run counter-clockwise
+                            // distorted for that (sound quads twist there),
+                            // and so is a rotated lattice (a wall nearly along
+                            // the edge twists sound quads at any grid): the
+                            // cells around the edge run counter-clockwise
                             // about +a, so its quad faces +a if the edge
-                            // starts inside.
+                            // starts inside. Folds then fail the volume check.
                             Vec3 out;
                             out[a] = v0 < 0 ? 1.0 : -1.0;
                             const Vec3 nrm = cross(verts_[size_t(poly[2])].p - verts_[size_t(poly[0])].p,
                                                    verts_[size_t(poly[3])].p - verts_[size_t(poly[1])].p);
-                            if (straight_ ? v0 >= 0 : dot(nrm, out) < 0) std::reverse(poly.begin(), poly.end());
+                            if (straight_ || lat_.rotated ? v0 >= 0 : dot(nrm, out) < 0)
+                                std::reverse(poly.begin(), poly.end());
                             Patch p;
                             p.wall = w;
                             for (int k = 0; k < 4; ++k) p.v[size_t(k)] = poly[size_t(k)];
@@ -2367,7 +2370,7 @@ SmoothReport writeSmoothStep(const std::string& path, const std::string& name, c
         const Shape& s = lat.shape;
         const double c = std::min({lat.cell[0], lat.cell[1], lat.cell[2]}), pi = 0.5 * kTwoPi;
         auto steps = [&](double length, int least) { return std::max(least, int(std::lround(length / c))); };
-        pc[0] = steps(s.r1, 1);
+        pc[0] = steps(s.r1 - s.r0, 1);
         pc[1] = steps(2 * pi * (s.r1 + s.major), 3);
         pc[2] = s.kind == ShapeKind::Cylinder ? steps(s.height, 1) : s.kind == ShapeKind::Sphere ? steps(pi * s.r1, 2) : steps(2 * pi * s.r1, 3);
         for (int a = 0; a < 3; ++a) L.shape.cells[a] = pc[a];
@@ -2396,8 +2399,10 @@ SmoothReport writeSmoothStep(const std::string& path, const std::string& name, c
             x = x * (1 / norm(x));
             L.shape.frame[0] = x, L.shape.frame[1] = cross(best, x), L.shape.frame[2] = best;
         }
-    } else if (lat.grade < 0 && cells[0] * cells[1] * cells[2] > 1 && !(lat.wall && lat.shape.mapped())) {
-        // (A wall in mm needs the mapping, which the straight probe cell lacks.)
+    } else if (lat.grade < 0 && cells[0] * cells[1] * cells[2] > 1 && !(lat.wall && lat.shape.mapped()) &&
+               !lat.rotated) {
+        // (A wall in mm needs the mapping, which the straight probe cell
+        // lacks; a rotated lattice does not repeat per cell of the box.)
         patches = probeCell(lat, patches, last, tol);
     }
     SmoothReport r;

@@ -118,6 +118,9 @@ step_test(torus-shell --shape torus-shell --radius 4 10 --major 25 --cells 1 12 
 # Sphere shell: cone ends, and a dome that ends at the equator plane.
 step_test(sphere-shell --shape sphere-shell --radius 15 25 --cells 1 12 5)
 step_test(sphere-dome --shape sphere-shell --radius 15 25 --cells 1 12 3 --polar 10 90)
+# Rotated lattice (exact edges), and a hollow trimmed sphere.
+step_test(rotated --type diamond --rotate 30 20 10 --cells 1)
+step_test(sphere-hollow --shape sphere --radius 6 12 --type schwarz-p --form network --density 0.3)
 # Wall thickness in mm (the field divided by its gradient), also mapped.
 step_test(wall --wall 0.6 --cells 1)
 step_test(wall-tube --shape tube --radius 10 20 --height 10 --cells 1 6 1 --wall 0.6)
@@ -156,11 +159,20 @@ add_test(NAME channel-fluids-stl COMMAND tpms --part void --channel-buffers x y 
 # The report with its inputs, as CSV.
 add_test(NAME report-csv COMMAND tpms --material 4430 114 --flow 0.1 -o ${CMAKE_BINARY_DIR}/test-report.csv)
 add_test(NAME report COMMAND tpms --shape tube --radius 10 20 --height 10 --cells 1 6 1 --report -o ${CMAKE_BINARY_DIR}/test-report.json)
+# The surfaces' gradients (used for --wall) against finite differences.
+add_executable(check-gradients tests/check_gradients.cpp)
+target_include_directories(check-gradients PRIVATE src)
+add_test(NAME gradients COMMAND check-gradients)
+# Batch run: files per value, one joined CSV.
+add_test(NAME sweep COMMAND ${CMAKE_COMMAND} -DTPMS=$<TARGET_FILE:tpms> -DOUT=${CMAKE_BINARY_DIR}
+         -P ${CMAKE_SOURCE_DIR}/tests/sweep.cmake)
 # Conflicting options must be refused (exit 2), not silently resolved.
 add_test(NAME usage-density-and-level COMMAND tpms --density 0.3 --level 0.5 -o ${CMAKE_BINARY_DIR}/test-usage.stl)
 set_tests_properties(usage-density-and-level PROPERTIES WILL_FAIL TRUE)
 add_test(NAME usage-channel-buffers-network COMMAND tpms --form network --channel-buffers x y 5 -o ${CMAKE_BINARY_DIR}/test-usage.stl)
 set_tests_properties(usage-channel-buffers-network PROPERTIES WILL_FAIL TRUE)
+add_test(NAME usage-rotate-tube COMMAND tpms --shape tube --radius 10 20 --height 10 --rotate 10 0 0 -o ${CMAKE_BINARY_DIR}/test-usage.stl)
+set_tests_properties(usage-rotate-tube PROPERTIES WILL_FAIL TRUE)
 add_test(NAME usage-wall-network COMMAND tpms --form network --wall 0.5 -o ${CMAKE_BINARY_DIR}/test-usage.stl)
 set_tests_properties(usage-wall-network PROPERTIES WILL_FAIL TRUE)
 # Every shape as a closed STL mesh (exit 1 if not closed, 2 if empty).

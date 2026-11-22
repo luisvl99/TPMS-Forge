@@ -13,26 +13,60 @@ namespace tpms {
 
 constexpr double kTwoPi = 6.283185307179586;
 
-// Surface function f(x, y, z) with period 2*pi along each axis. The surface is f = 0.
+struct Vec3 {
+    double x = 0, y = 0, z = 0;
+    double& operator[](int i) { return i == 0 ? x : i == 1 ? y : z; }
+    double operator[](int i) const { return i == 0 ? x : i == 1 ? y : z; }
+};
+
+inline Vec3 operator+(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+inline Vec3 operator-(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+inline Vec3 operator*(Vec3 a, double s) { return {a.x * s, a.y * s, a.z * s}; }
+inline double dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline Vec3 cross(Vec3 a, Vec3 b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+inline double norm(Vec3 a) { return std::sqrt(dot(a, a)); }
+
+// Surface function f(x, y, z) with period 2*pi along each axis, and its
+// gradient. The surface is f = 0.
 using SurfaceFn = double (*)(double x, double y, double z);
+using GradientFn = Vec3 (*)(double x, double y, double z);
 
 inline double gyroid(double x, double y, double z) {
     return std::sin(x) * std::cos(y) + std::sin(y) * std::cos(z) + std::sin(z) * std::cos(x);
+}
+inline Vec3 gyroidGrad(double x, double y, double z) {
+    const double sx = std::sin(x), sy = std::sin(y), sz = std::sin(z);
+    const double cx = std::cos(x), cy = std::cos(y), cz = std::cos(z);
+    return {cx * cy - sz * sx, cy * cz - sx * sy, cz * cx - sy * sz};
 }
 
 inline double schwarzP(double x, double y, double z) {
     return std::cos(x) + std::cos(y) + std::cos(z);
 }
+inline Vec3 schwarzPGrad(double x, double y, double z) { return {-std::sin(x), -std::sin(y), -std::sin(z)}; }
 
 inline double diamond(double x, double y, double z) {
     const double sx = std::sin(x), sy = std::sin(y), sz = std::sin(z);
     const double cx = std::cos(x), cy = std::cos(y), cz = std::cos(z);
     return sx * sy * sz + sx * cy * cz + cx * sy * cz + cx * cy * sz;
 }
+inline Vec3 diamondGrad(double x, double y, double z) {
+    const double sx = std::sin(x), sy = std::sin(y), sz = std::sin(z);
+    const double cx = std::cos(x), cy = std::cos(y), cz = std::cos(z);
+    return {cx * sy * sz + cx * cy * cz - sx * sy * cz - sx * cy * sz,
+            sx * cy * sz - sx * sy * cz + cx * cy * cz - cx * sy * sz,
+            sx * sy * cz - sx * cy * sz - cx * sy * sz + cx * cy * cz};
+}
 
 inline double neovius(double x, double y, double z) {
     const double cx = std::cos(x), cy = std::cos(y), cz = std::cos(z);
     return 3.0 * (cx + cy + cz) + 4.0 * cx * cy * cz;
+}
+inline Vec3 neoviusGrad(double x, double y, double z) {
+    const double cx = std::cos(x), cy = std::cos(y), cz = std::cos(z);
+    return {-std::sin(x) * (3 + 4 * cy * cz), -std::sin(y) * (3 + 4 * cz * cx), -std::sin(z) * (3 + 4 * cx * cy)};
 }
 
 inline double iwp(double x, double y, double z) {
@@ -40,10 +74,22 @@ inline double iwp(double x, double y, double z) {
     return 2.0 * (cx * cy + cy * cz + cz * cx) -
            (std::cos(2 * x) + std::cos(2 * y) + std::cos(2 * z));
 }
+inline Vec3 iwpGrad(double x, double y, double z) {
+    const double cx = std::cos(x), cy = std::cos(y), cz = std::cos(z);
+    return {-2 * std::sin(x) * (cy + cz) + 2 * std::sin(2 * x), -2 * std::sin(y) * (cz + cx) + 2 * std::sin(2 * y),
+            -2 * std::sin(z) * (cx + cy) + 2 * std::sin(2 * z)};
+}
 
 inline double frd(double x, double y, double z) {
     const double c2x = std::cos(2 * x), c2y = std::cos(2 * y), c2z = std::cos(2 * z);
     return 4.0 * std::cos(x) * std::cos(y) * std::cos(z) - (c2x * c2y + c2y * c2z + c2z * c2x);
+}
+inline Vec3 frdGrad(double x, double y, double z) {
+    const double cx = std::cos(x), cy = std::cos(y), cz = std::cos(z);
+    const double c2x = std::cos(2 * x), c2y = std::cos(2 * y), c2z = std::cos(2 * z);
+    return {-4 * std::sin(x) * cy * cz + 2 * std::sin(2 * x) * (c2y + c2z),
+            -4 * std::sin(y) * cz * cx + 2 * std::sin(2 * y) * (c2z + c2x),
+            -4 * std::sin(z) * cx * cy + 2 * std::sin(2 * z) * (c2x + c2y)};
 }
 
 inline double fischerKochS(double x, double y, double z) {
@@ -51,27 +97,36 @@ inline double fischerKochS(double x, double y, double z) {
            std::cos(x) * std::cos(2 * y) * std::sin(z) +
            std::sin(x) * std::cos(y) * std::cos(2 * z);
 }
+inline Vec3 fischerKochSGrad(double x, double y, double z) {
+    const double sx = std::sin(x), sy = std::sin(y), sz = std::sin(z);
+    const double cx = std::cos(x), cy = std::cos(y), cz = std::cos(z);
+    const double s2x = std::sin(2 * x), s2y = std::sin(2 * y), s2z = std::sin(2 * z);
+    const double c2x = std::cos(2 * x), c2y = std::cos(2 * y), c2z = std::cos(2 * z);
+    return {-2 * s2x * sy * cz - sx * c2y * sz + cx * cy * c2z, c2x * cy * cz - 2 * cx * s2y * sz - sx * sy * c2z,
+            -c2x * sy * sz + cx * c2y * cz - 2 * sx * cy * s2z};
+}
 
 struct Surface {
     std::string name;
     std::vector<std::string> aliases;
     std::string formula;
     SurfaceFn f;
+    GradientFn grad;
 };
 
 inline const std::vector<Surface>& surfaces() {
     static const std::vector<Surface> list = {
-        {"gyroid", {"g"}, "sin x cos y + sin y cos z + sin z cos x", gyroid},
-        {"schwarz-p", {"p", "primitive"}, "cos x + cos y + cos z", schwarzP},
+        {"gyroid", {"g"}, "sin x cos y + sin y cos z + sin z cos x", gyroid, gyroidGrad},
+        {"schwarz-p", {"p", "primitive"}, "cos x + cos y + cos z", schwarzP, schwarzPGrad},
         {"diamond", {"d", "schwarz-d"},
-         "sin x sin y sin z + sin x cos y cos z + cos x sin y cos z + cos x cos y sin z", diamond},
-        {"neovius", {}, "3 (cos x + cos y + cos z) + 4 cos x cos y cos z", neovius},
+         "sin x sin y sin z + sin x cos y cos z + cos x sin y cos z + cos x cos y sin z", diamond, diamondGrad},
+        {"neovius", {}, "3 (cos x + cos y + cos z) + 4 cos x cos y cos z", neovius, neoviusGrad},
         {"iwp", {"schoen-iwp"},
-         "2 (cos x cos y + cos y cos z + cos z cos x) - (cos 2x + cos 2y + cos 2z)", iwp},
+         "2 (cos x cos y + cos y cos z + cos z cos x) - (cos 2x + cos 2y + cos 2z)", iwp, iwpGrad},
         {"frd", {"schoen-frd"},
-         "4 cos x cos y cos z - (cos 2x cos 2y + cos 2y cos 2z + cos 2z cos 2x)", frd},
+         "4 cos x cos y cos z - (cos 2x cos 2y + cos 2y cos 2z + cos 2z cos 2x)", frd, frdGrad},
         {"fischer-koch-s", {"fks"},
-         "cos 2x sin y cos z + cos x cos 2y sin z + sin x cos y cos 2z", fischerKochS},
+         "cos 2x sin y cos z + cos x cos 2y sin z + sin x cos y cos 2z", fischerKochS, fischerKochSGrad},
     };
     return list;
 }
@@ -88,21 +143,6 @@ inline const Surface* findSurface(std::string name) {
 
 enum class Form { Network, Sheet };  // network: f <= c, sheet: |f| <= c
 enum class Part { Solid, Void };     // void = shape minus solid (fluid domain)
-
-struct Vec3 {
-    double x = 0, y = 0, z = 0;
-    double& operator[](int i) { return i == 0 ? x : i == 1 ? y : z; }
-    double operator[](int i) const { return i == 0 ? x : i == 1 ? y : z; }
-};
-
-inline Vec3 operator+(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
-inline Vec3 operator-(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
-inline Vec3 operator*(Vec3 a, double s) { return {a.x * s, a.y * s, a.z * s}; }
-inline double dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-inline Vec3 cross(Vec3 a, Vec3 b) {
-    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
-}
-inline double norm(Vec3 a) { return std::sqrt(dot(a, a)); }
 
 // The outer shape of the part.
 // - Box: the lattice fills [0, cells x cell].
@@ -159,6 +199,7 @@ struct Shape {
         static const char* const bentNames[6] = {"inner", "outer", "", "", "bottom", "top"};
         static const char* const cylinder[6] = {"", "side", "", "", "bottom", "top"};
         if (kind == ShapeKind::Cylinder) return cylinder[F];
+        if (kind == ShapeKind::Sphere && r0 > 0) return F < 2 ? bentNames[F] : "";  // hollow: inner, outer
         if (trimmed()) return F == 1 ? "surface" : "";
         if (kind == ShapeKind::TorusShell && F >= 4) return "";
         return bent() ? bentNames[F] : box[F];
@@ -179,7 +220,7 @@ struct Shape {
     // Trimmed: face F of the parameter box maps to a line or a point (the
     // axis, the center line of a torus, the center or a pole of a sphere).
     bool pole(int F) const {
-        if (kind == ShapeKind::Sphere) return F == 0 || F >= 4;
+        if (kind == ShapeKind::Sphere) return (F == 0 && r0 == 0) || F >= 4;  // hollow: no center
         return (kind == ShapeKind::Cylinder || kind == ShapeKind::Torus) && F == 0;
     }
 
@@ -208,7 +249,8 @@ struct Shape {
     Vec3 map(Vec3 p) const {
         if (kind == ShapeKind::Box) return {boxPos(0, p.x), boxPos(1, p.y), boxPos(2, p.z)};
         if (trimmed()) {
-            const double r = r1 * p.x / cells[0], a = kTwoPi * p.y / cells[1], ca = std::cos(a), sa = std::sin(a);
+            const double r = r0 + (r1 - r0) * p.x / cells[0], a = kTwoPi * p.y / cells[1], ca = std::cos(a),
+                         sa = std::sin(a);
             if (kind == ShapeKind::Cylinder) return {r * ca, r * sa, height * (p.z / cells[2] - 0.5)};
             if (kind == ShapeKind::Sphere) {
                 const double t = 0.5 * kTwoPi * p.z / cells[2], s = r * std::sin(t);
@@ -264,9 +306,10 @@ struct Shape {
         if (kind == ShapeKind::Box) return mapped() ? boxPos(0, p.x) * boxCell(1, p.y) * boxCell(2, p.z) : p.x;
         const double pi = 0.5 * kTwoPi;
         if (trimmed()) {  // as the tube and torus shell with r0 = 0, and the sphere's r^3 / 3 sin t
-            const double r = r1 * p.x / cells[0], k = pi / (cells[1] * cells[2]);
+            const double r = r0 + (r1 - r0) * p.x / cells[0], k = pi / (cells[1] * cells[2]);
             if (kind == ShapeKind::Cylinder) return k * height * r * r;
-            if (kind == ShapeKind::Sphere) return k * pi * std::sin(pi * p.z / cells[2]) * r * r * r * (2.0 / 3);
+            if (kind == ShapeKind::Sphere)
+                return k * pi * std::sin(pi * p.z / cells[2]) * (r * r * r - r0 * r0 * r0) * (2.0 / 3);
             return 4 * k * pi * (major * r * r / 2 + std::cos(kTwoPi * p.z / cells[2]) * r * r * r / 3);
         }
         const double r = radius(p.x);
@@ -349,7 +392,7 @@ struct Shape {
     double inside(double x, double y, double z) const {
         const double rho = std::hypot(x, y);
         if (kind == ShapeKind::Cylinder) return std::max(rho - r1, std::fabs(z) - 0.5 * height);
-        if (kind == ShapeKind::Sphere) return std::sqrt(rho * rho + z * z) - r1;
+        if (kind == ShapeKind::Sphere) return std::max(std::hypot(rho, z) - r1, r0 - std::hypot(rho, z));
         return std::hypot(rho - major, z) - r1;
     }
 
@@ -361,7 +404,7 @@ struct Shape {
         case ShapeKind::Tube: return pi * (r1 * r1 - r0 * r0) * height;
         case ShapeKind::TorusShell: return 2 * pi * pi * major * (r1 * r1 - r0 * r0);
         case ShapeKind::Cylinder: return pi * r1 * r1 * height;
-        case ShapeKind::Sphere: return 4.0 / 3.0 * pi * r1 * r1 * r1;
+        case ShapeKind::Sphere: return 4.0 / 3.0 * pi * (r1 * r1 * r1 - r0 * r0 * r0);
         case ShapeKind::Torus: return 2 * pi * pi * major * r1 * r1;
         case ShapeKind::SphereShell:
             return kTwoPi / 3 * (r1 * r1 * r1 - r0 * r0 * r0) * (std::cos(polar[0]) - std::cos(polar[1]));
@@ -372,6 +415,7 @@ struct Shape {
 
 struct Lattice {
     SurfaceFn f = gyroid;
+    GradientFn grad = gyroidGrad;  // of f
     Form form = Form::Sheet;
     Part part = Part::Solid;
     double level = 0.0;               // iso level c (graded: at the start)
@@ -386,12 +430,20 @@ struct Lattice {
     // Sheet of a set wall thickness: value() is f / |grad f| in mm, about the
     // distance to the surface f = 0, and the level is half the wall.
     bool wall = false;
+    // Rotated lattice (box and trimmed shapes): value() samples it at
+    // turn * p; the rows of turn are those of the inverse rotation.
+    bool rotated = false;
+    Vec3 turn[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
 
     // Surface function f at a point (or f / |grad f|, see `wall`). The phase
     // (in cells) is reduced to one cell, and points within 1e-12 of a cell
     // boundary are put on it, so a point and its copy one cell over give the
     // same value bit for bit: opposite faces of a cell match exactly.
     double value(double x, double y, double z) const {
+        if (rotated) {
+            const Vec3 p{x, y, z};
+            x = dot(turn[0], p), y = dot(turn[1], p), z = dot(turn[2], p);
+        }
         auto phase = [](double u, double offset) {
             const double k = std::round(u);
             if (std::fabs(u - k) < 1e-12) u = k;
@@ -401,11 +453,10 @@ struct Lattice {
         const double u = phase(x / cell[0], shift[0]), v = phase(y / cell[1], shift[1]), w = phase(z / cell[2], shift[2]);
         const double fv = f(u, v, w);
         if (!wall) return fv;
-        // The gradient from the reduced phase, so copies stay identical; in
-        // a parameter box, mapped to mm.
-        constexpr double h = 1e-5;
-        Vec3 g{f(u + h, v, w) - f(u - h, v, w), f(u, v + h, w) - f(u, v - h, w), f(u, v, w + h) - f(u, v, w - h)};
-        for (int a = 0; a < 3; ++a) g[a] *= kTwoPi / (2 * h * cell[a]);
+        // The gradient at the reduced phase, so copies stay identical; in a
+        // parameter box, mapped to mm.
+        Vec3 g = grad(u, v, w);
+        for (int a = 0; a < 3; ++a) g[a] *= kTwoPi / cell[a];
         if (shape.mapped()) g = shape.gradient({x, y, z}, g);
         return fv / std::max(norm(g), 1e-12);
     }

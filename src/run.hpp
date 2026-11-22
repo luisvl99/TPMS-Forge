@@ -38,6 +38,7 @@ struct Options {
     bool unitCell = false;  // box: a periodic cell (exact edges, every piece kept)
     bool plates = false, buffers = false;  // box: slabs (shape.slab) on a solid, or on the fluid
     double shift[3] = {0, 0, 0};  // offset of the lattice, in cells
+    double rotate[3] = {0, 0, 0};  // rotation of the lattice about x, then y, then z, degrees
     // Report inputs. material: solid density kg/m^3 and Young's modulus GPa
     // (0: not given). flow: superficial velocity m/s (0: not given), fluid
     // viscosity Pa s and density kg/m^3 (water by default).
@@ -101,6 +102,13 @@ struct Report {
     size_t cavities = 0;                 // inner cavity shells (solid and fluid)
     std::vector<ReportPiece> solids, fluids;  // largest first
     std::vector<std::pair<std::string, std::string>> opposite;  // pairs of opposite faces of the shape
+    // Pore sizes from a voxel grid in mm: per fluid channel (0 for a
+    // network's fluid), the largest sphere inside it, and for each pair in
+    // `opposite` the largest sphere that passes from one face to the other
+    // (0: none passes). Diameters in mm, within about a voxel.
+    double voxel = 0;
+    double pore[2] = {0, 0};
+    std::vector<double> throat[2];
 };
 Report makeReport(const Options& o, const Lattice& lat, int res);
 // The report as (label, value) rows, for the command line and the GUI.

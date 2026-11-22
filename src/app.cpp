@@ -64,6 +64,10 @@ struct Settings {
     float material[2] = {0, 0};          // report: solid density kg/m^3, Young's modulus GPa (0: none)
     float flow[3] = {0, 0.001f, 998};    // report: velocity m/s (0: none), viscosity Pa s, density kg/m^3
     float shift[3] = {0, 0, 0};  // offset of the lattice, in cells
+    float rotate[3] = {0, 0, 0};  // rotation of the lattice about x, y, z, degrees (box, trimmed)
+    bool sweep = false;           // export once per value of one option
+    int sweepOption = 0;          // thickness (as chosen), cell size, cell count, surface type
+    char sweepValues[256] = "0.1:0.3:0.05";
     int shape = kBox;
     bool cubic = true;
     float cell[3] = {10, 10, 10};
@@ -86,7 +90,7 @@ void shapeDefaults(Settings& s) {
     if (s.shape == kTube) s.r0 = 15, s.r1 = 25, s.height = 30;
     if (s.shape == kTorusShell) s.r0 = 5, s.r1 = 15, s.major = 40;
     if (s.shape == kCylinder) s.r1 = 15, s.height = 30;
-    if (s.shape == kSphere) s.r1 = 15;
+    if (s.shape == kSphere) s.r0 = 0, s.r1 = 15;  // r0 > 0: hollow
     if (s.shape == kTorus) s.r1 = 10, s.major = 30;
     if (s.shape == kSphereShell) s.r0 = 15, s.r1 = 25, s.polar[0] = 20, s.polar[1] = 160;
 }
@@ -114,7 +118,12 @@ std::vector<std::string> geometryArgs(const Settings& s) {
     if (s.graded && s.grade) a.insert(a.end(), {"--grade", axes[s.grade]});
     if (s.shape != kBox) a.insert(a.end(), {"--shape", kShapeArgs[s.shape]});
     if (bentShape(s.shape)) a.insert(a.end(), {"--radius", num(s.r0), num(s.r1)});
+    else if (s.shape == kSphere && s.r0 > 0) a.insert(a.end(), {"--radius", num(s.r0), num(s.r1)});
     else if (s.shape != kBox) a.insert(a.end(), {"--radius", num(s.r1)});
+    // Rotation: straight cells only (the box without unit cell or cell grading, trimmed shapes).
+    const bool straight = (s.shape == kBox && !s.unitCell && !s.cellGraded) || (s.shape != kBox && !bentShape(s.shape));
+    if (straight && (s.rotate[0] || s.rotate[1] || s.rotate[2]))
+        a.insert(a.end(), {"--rotate", num(s.rotate[0]), num(s.rotate[1]), num(s.rotate[2])});
     if (s.shape == kSphereShell) a.insert(a.end(), {"--polar", num(s.polar[0]), num(s.polar[1])});
     if (s.shape == kTube || s.shape == kCylinder) a.insert(a.end(), {"--height", num(s.height)});
     if (s.shape == kTorusShell || s.shape == kTorus) a.insert(a.end(), {"--major", num(s.major)});
@@ -161,6 +170,17 @@ std::vector<std::string> exportArgs(const Settings& s) {
         }
     }
     a.insert(a.end(), {"-o", s.out});
+    if (s.sweep) {  // values separated by spaces, or FROM:TO:STEP
+        const char* const by[3] = {"--density", "--level", "--wall"};
+        const char* const options[4] = {by[s.thickness], "--cell", "--cells", "--type"};
+        a.insert(a.end(), {"--sweep", options[s.sweepOption]});
+        std::string v;
+        for (const char* c = s.sweepValues;; ++c) {
+            if (*c && *c != ' ') v += *c;
+            else if (!v.empty()) a.push_back(v), v.clear();
+            if (!*c) break;
+        }
+    }
     return a;
 }
 
@@ -605,7 +625,8 @@ Settings fromOptions(const Options& o) {
     for (int k = 0; k < 2; ++k) s.material[k] = float(o.material[k]);
     for (int k = 0; k < 3; ++k) s.flow[k] = float(o.flow[k]);
     if (o.unitCell) s.exact = false, s.minFragment = 0.01f;  // implied by the unit cell, not chosen
-    for (int a = 0; a < 3; ++a) s.shift[a] = float(o.shift[a]);
+    if (o.rotate[0] || o.rotate[1] || o.rotate[2]) s.exact = false;  // implied by the rotation
+    for (int a = 0; a < 3; ++a) s.shift[a] = float(o.shift[a]), s.rotate[a] = float(o.rotate[a]);
     for (int a = 0; a < 3; ++a) s.cell[a] = float(o.cell[a]), s.cells[a] = o.cells[a];
     s.cubic = o.cell[0] == o.cell[1] && o.cell[1] == o.cell[2];
     s.shape = int(o.shape.kind);  // the GUI list follows ShapeKind
@@ -779,10 +800,12 @@ int main(int argc, char** argv) {
             }
         } else if (s.shape != kBox) {
             ImGui::InputFloat(s.shape == kTorus ? "Tube radius (mm)" : "Radius (mm)", &s.r1, 1, 5, "%.2f");
+            if (s.shape == kSphere) ImGui::InputFloat("Inner radius (0: solid)", &s.r0, 1, 5, "%.2f");
         }
         if (s.shape == kTube || s.shape == kCylinder) ImGui::InputFloat("Height (mm)", &s.height, 1, 5, "%.2f");
         // Keep sizes valid: positive, inner below outer, the ring outside the tube.
-        s.r0 = std::max(0.1f, s.r0), s.r1 = std::max(bent ? s.r0 + 0.1f : 0.1f, s.r1);
+        const bool hollow = s.shape == kSphere && s.r0 > 0;
+        s.r0 = std::max(s.shape == kSphere ? 0.0f : 0.1f, s.r0), s.r1 = std::max(bent || hollow ? s.r0 + 0.1f : 0.1f, s.r1);
         s.height = std::max(0.1f, s.height), s.major = std::max(s.r1 + 0.1f, s.major);
         if (bent) {
             ImGui::InputInt3(s.shape == kTube         ? "Cells: r, around, z"
@@ -873,6 +896,14 @@ int main(int argc, char** argv) {
             ImGui::TextDisabled("Cells: %.1f mm radial, %.1f-%.1f ring, %.1f-%.1f tube",
                                 (s.r1 - s.r0) / s.cells[0], tau * (s.major - s.r1) / s.cells[1],
                                 tau * (s.major + s.r1) / s.cells[1], tau * s.r0 / s.cells[2], tau * s.r1 / s.cells[2]);
+        if (s.shape == kBox || !bent) {
+            ImGui::BeginDisabled(s.shape == kBox && (s.unitCell || s.cellGraded));
+            ImGui::InputFloat3("Rotation (deg)", s.rotate, "%.1f");
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Turns the lattice about the origin: about x, then y, then z. For printing without\n"
+                                  "overhangs, or to line up the stiff directions with the loads. Straight cells only.");
+        }
         ImGui::InputFloat3("Offset (cells)", s.shift, "%.3f");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Moves the lattice, in cells, so the faces of the shape cut it elsewhere.\n"
@@ -900,13 +931,26 @@ int main(int argc, char** argv) {
                 ImGui::InputInt("Start patches per cell", &s.patches);
                 ImGui::InputFloat("Tolerance (mm)", &s.tol, 0, 0, s.tol > 0 ? "%.4f" : "%.0f (auto)");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = auto: 0.001 x the smallest cell edge.");
-                bool exact = s.exact || unitCell;  // a unit cell always has exact edges
-                ImGui::BeginDisabled(unitCell);
+                // A unit cell and a rotated lattice always have exact edges.
+                const bool rotated = s.rotate[0] || s.rotate[1] || s.rotate[2];
+                const bool forced = unitCell || (rotated && (s.shape == kBox || !bentShape(s.shape)) && !s.cellGraded);
+                bool exact = s.exact || forced;
+                ImGui::BeginDisabled(forced);
                 if (ImGui::Checkbox("Exact edges (more faces)", &exact)) s.exact = exact;
                 ImGui::EndDisabled();
             }
         }
         s.res = std::max(4, s.res), s.patches = std::max(2, s.patches), s.tol = std::max(0.0f, s.tol);
+        ImGui::Checkbox("Sweep (one export per value)", &s.sweep);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Exports once per value of one setting. Each file gets the value in its name; with a\n"
+                              ".csv output, the property reports go to one table, one line per value.");
+        if (s.sweep) {
+            ImGui::Combo("Vary", &s.sweepOption, "Thickness (as chosen above)\0Cell size (mm)\0Cell count\0Surface type\0");
+            ImGui::InputText("Values", s.sweepValues, sizeof s.sweepValues);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Separated by spaces (0.1 0.2 0.3, or gyroid diamond), or FROM:TO:STEP (0.1:0.3:0.05).");
+        }
 
         const std::vector<std::string> args = exportArgs(s);
         const bool exporting = exportJob.valid();

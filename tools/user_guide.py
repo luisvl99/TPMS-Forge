@@ -50,6 +50,7 @@ VIEWS = [
     ("g-density", "--density 0.1 0.4 --grade x --cells 4 2 2"),
     ("g-cell", "--cell 5 --cells 4 2 2 --cell-grade x 15"),
     ("u-cell", "--unit-cell --type schwarz-p --form network --density 0.3 --shift 0.5"),
+    ("r-rotated", "--rotate 30 20 10 --cells 3"),
     ("p-plates", "--plates z 1.5"),
     ("p-buffers", "--part void --buffers x 10"),
     ("hx-void", "--part void --channel-buffers x y 5 1"),
@@ -322,8 +323,10 @@ def build():
         "<b>Periodic unit cells</b> for homogenization, with matching opposite faces.",
         "<b>Plates</b> for sandwich panels, <b>buffers</b> as CFD inlet and outlet zones, and <b>channel "
         "buffers</b> that give each fluid of a heat exchanger its own inlet and outlet.",
-        "<b>Property report</b>: volumes, wetted area, hydraulic diameters, wall thickness, connectivity, "
-        "mass, stiffness bounds, permeability and pressure drop estimates; as text, JSON or CSV.",
+        "<b>Rotated lattices</b> in a box or a trimmed shape, and <b>batch runs</b> over any option.",
+        "<b>Property report</b>: volumes, wetted area, hydraulic diameters, wall thickness, pore and throat "
+        "sizes, connectivity, mass, stiffness bounds, permeability and pressure drop estimates; as text, JSON or "
+        "CSV.",
         "<b>Self-checks</b> on every file: closed solids, fit error against the exact surface, and the volume "
         "against the field.",
     ])
@@ -336,7 +339,7 @@ def build():
          "three files that fill the domain exactly", "9.3"],
         ["Effective stiffness or conductivity", "a periodic unit cell", "9.4"],
         ["3D printing", "STL", "9.5"],
-        ["Comparing designs", "the property report as CSV, one row per run", "9.6"],
+        ["Comparing designs", "a batch run with the property report as CSV, one line per value", "8.2"],
     ], [0.36, 0.52, 0.12])
     s += H2("Units and coordinates")
     s += bullets([
@@ -479,10 +482,16 @@ Time      : 0.12 s""")
     s += gallery([(v["g-density"], "Solid fraction 0.1 to 0.4 along x (--density 0.1 0.4)"),
                   (v["g-cell"], "Cells from 5 to 15 mm along x (--cell 5 --cell-grade x 15)")], 2,
                  height=50 * mm)
-    s += H2("Offset")
+    s += H2("Offset and rotation")
     s.append(P(f"{c('--shift S')} (or {c('Sx Sy Sz')}, in cells) moves the lattice, so the faces of the shape cut "
                "it elsewhere: away from thin slivers at the box faces, or with a node at the center of a unit "
                f"cell ({c('--shift 0.5')} for Schwarz P)."))
+    s.append(P(f"{c('--rotate AX AY AZ')} (box and trimmed shapes) turns the lattice about the origin: AX degrees "
+               "about x, then AY about y, then AZ about z. Use it to print without overhangs, or to line up the "
+               "lattice's stiff directions with the loads. The faces of the box then cut the cells anywhere, so "
+               "smooth STEP needs finer patch grids (seconds to a minute) and keeps exact edges: merged faces of a "
+               "rotated lattice can fail strict CAD checks."))
+    s.append(picture(v["r-rotated"], 60 * mm, "Gyroid turned 30, 20 and 10 degrees in a box (--rotate 30 20 10)"))
 
     # 5 Shapes
     s += H1("Shapes")
@@ -493,12 +502,13 @@ Time      : 0.12 s""")
         [c("torus-shell"), c("--radius R0 R1 --major R"), c("--cells radial ring tube"), "cells follow the shape"],
         [c("sphere-shell"), c("--radius R0 R1 --polar A0 A1"), c("--cells radial around S-N"), "cells follow the shape"],
         [c("cylinder"), c("--radius R --height H"), c("--cell L"), "trimmed"],
-        [c("sphere"), c("--radius R"), c("--cell L"), "trimmed"],
+        [c("sphere"), c("--radius R") + " (hollow: " + c("R0 R1") + ")", c("--cell L"), "trimmed"],
         [c("torus"), c("--radius r --major R"), c("--cell L"), "trimmed"],
     ], [0.19, 0.3, 0.3, 0.21])
     s += code("tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.step\n"
               "tpms --shape sphere-shell --radius 15 25 --cells 1 12 5 --polar 20 160 -o shell.step\n"
-              "tpms --shape sphere --radius 15 --cell 10 -o sphere.step")
+              "tpms --shape sphere --radius 15 --cell 10 -o sphere.step\n"
+              "tpms --shape sphere --radius 8 15 --cell 10 -o hollow.step")
     s += gallery([(v["s-tube"], "tube"), (v["s-torus-shell"], "torus-shell"), (v["s-sphere-shell"], "sphere-shell"),
                   (v["s-cylinder"], "cylinder"), (v["s-sphere"], "sphere"), (v["s-torus"], "torus")], 3, height=40 * mm)
     s += bullets([
@@ -511,6 +521,8 @@ Time      : 0.12 s""")
         "default 20 160) and stays open around the poles. Its ends are cones from the center, or the plane z = 0 "
         f"at 90 degrees: {c('--polar 10 90')} is a dome. Cells narrow around toward the ends; for a closed round "
         "part use the trimmed sphere.",
+        f"<b>Hollow sphere</b>: {c('--shape sphere --radius R0 R1')} cuts straight cells by two spheres: a "
+        "closed spherical shell, faces inner and outer.",
         "<b>Trimmed</b> (cylinder, sphere, torus): a straight lattice of --cell cells, cut by the shape. Use "
         "these for solid round parts: bending cells around an axis or a pole would squeeze them to nothing.",
         "Smooth STEP works for every shape, and the cut faces are exact: cylinders and end planes, tori, or a "
@@ -655,6 +667,9 @@ Time      : 0.12 s""")
         ["Pieces", "each solid and fluid piece, its volume and the faces of the shape it touches"],
         ["Connects", "for each pair of opposite faces, whether the solid and each fluid channel connect them: flow "
                      "through for CFD, a load path for FEA"],
+        ["Pore size", "per fluid channel: the largest sphere inside it, and for each pair of opposite faces the "
+                      "largest sphere that passes from one to the other (powder removal, clogging). From a voxel "
+                      "grid in mm, within about a voxel"],
     ], [0.24, 0.76])
     s += H2("Inputs")
     s += bullets([
@@ -667,14 +682,15 @@ Time      : 0.12 s""")
               "the default 24 (checked against CAD mass properties). Mass is exact for that volume. Stiffness, "
               "permeability and pressure drop are rough estimates from correlations, for comparing designs: use "
               "FEA on a unit cell and CFD for real values.")
-    s += H2("Parameter sweeps")
-    s.append(P("The CSV columns are the same for every run (empty where a value does not apply), so the lines of "
-               "several runs can be put together into one table. PowerShell:"))
-    s += code("""foreach ($d in 0.1, 0.2, 0.3) {
-    tpms --density $d --flow 0.1 -o "sweep_$d.csv"
-}
-$rows = Get-ChildItem sweep_*.csv | ForEach-Object { Get-Content $_ }
-$rows[0], ($rows | Where-Object { $_ -notlike 'surface,*' }) | Set-Content sweep.csv""")
+    s += H2("Batch runs")
+    s.append(P(f"{c('--sweep OPTION V1 V2 ...')} runs once per value of one option that takes one value "
+               f"({c('--density')}, {c('--wall')}, {c('--cell')}, {c('--cells')}, {c('--type')}, ...); values are "
+               f"listed or given as {c('FROM:TO:STEP')}. Each run's files get the value in their name, and a "
+               f"{c('.csv')} output collects the reports in one table, one line per run, with the value first. In "
+               "the GUI, <i>Sweep</i> under Export does the same."))
+    s += code("""tpms --sweep --density 0.1:0.3:0.05 --flow 0.1 -o gyroid.step -o results.csv
+    # gyroid_density-0.1.step ... gyroid_density-0.3.step, and results.csv
+tpms --sweep --type gyroid diamond schwarz-p --wall 0.5 -o results.csv""")
 
     # 9 Workflows
     s += H1("Workflows")
@@ -750,14 +766,15 @@ tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
         ("--cells N [Ny Nz]", "cell counts (default 2): box x y z; tube radial, around, along; torus shell "
                               "radial, around the ring, around the tube; sphere shell radial, around, south to "
                               "north"),
-        ("--radius R | R0 R1", "tube, torus or sphere shell: inner and outer radius; cylinder, sphere: radius; "
-                               "torus: tube radius"),
+        ("--radius R | R0 R1", "tube, torus or sphere shell: inner and outer radius; cylinder, sphere: radius "
+                               "(sphere R0 R1: hollow); torus: tube radius"),
         ("--polar A0 A1", "sphere shell: where it starts and ends, degrees from +z (default 20 160)"),
         ("--height H", "tube, cylinder: length along z"),
         ("--major R", "torus shell, torus: from the axis to the tube center"),
         ("--radial log|linear", "tube, torus or sphere shell: radial spacing (default log: square cells)"),
         ("--cell-grade x|y|z L1", "box: cell length from --cell to L1 mm along the axis"),
         ("--shift S [Sy Sz]", "offset of the lattice in cells (default 0)"),
+        ("--rotate AX AY AZ", "box, trimmed shapes: turn the lattice about x, then y, then z (degrees)"),
         ("--unit-cell", "box: a periodic cell for homogenization (--cells defaults to 1)"),
         ("--plates x|y|z T [T1]", "box, solid: plates T mm thick at the start and end of the axis"),
         ("--buffers x|y|z L [L1]", "box, void: buffer zones L mm long before and after the lattice"),
@@ -777,6 +794,8 @@ tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
         ("--report", "print the property report"),
         ("--material RHO [E]", "report: solid density kg/m³, Young's modulus GPa"),
         ("--flow U [MU RHO]", "report: velocity m/s, fluid viscosity Pa s and density kg/m³ (default water)"),
+        ("--sweep OPTION V1 V2 ...", "batch: one run per value (or FROM:TO:STEP); files named by value, one "
+                                     "joined CSV"),
         ("--list", "list the surface types"),
         ("-h, --help", "show the help"),
     ])
@@ -806,7 +825,9 @@ tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
         "The surfaces are level-set approximations of the minimal surfaces, and sheet walls are not exactly "
         "constant in thickness.",
         "Merged Neovius sheets on tubes and torus shells can be read as invalid; use --exact for those.",
-        "A sphere shell stays open around its poles; --wall makes smooth STEP several times slower.",
+        "A sphere shell stays open around its poles; --wall makes smooth STEP slower.",
+        "Merged faces on trimmed spheres can fail strict CAD checks (use --exact then); a rotated lattice always "
+        "keeps exact edges, so its files have more faces.",
         "Large lattices give large files: face count grows with the number of cells.",
         "Plates and buffers work on one axis of a box; channel buffers need a box and a sheet; grading is "
         "linear along one axis.",

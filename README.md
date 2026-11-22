@@ -108,6 +108,22 @@ build/tpms --part void --channel-buffers x y 10 1 -o hx_fluid.step
 build/tpms --channel-buffers x y 10 1 -o hx_solid.step
 ```
 
+Batch: one model per solid fraction from 0.1 to 0.3, and one table of their reports (`gyroid_density-0.1.step`, ..., `results.csv`):
+
+```bash
+build/tpms --sweep --density 0.1:0.3:0.05 -o gyroid.step -o results.csv
+```
+
+Lattice turned 30 degrees about x and 20 about y inside a box, and a hollow sphere of straight cells:
+
+```bash
+build/tpms --rotate 30 20 0 -o turned.step
+```
+
+```bash
+build/tpms --shape sphere --radius 6 12 -o hollow.step
+```
+
 Report with mass, stiffness and pressure drop estimates for Ti-6Al-4V (4430 kg/m³, 114 GPa) and water at 0.1 m/s, as CSV:
 
 ```bash
@@ -155,7 +171,13 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 - Every piece is kept (`--min-fragment 0`): a small piece cut off at a corner continues in the next cell.
 - No grading.
 
-`--shift S` (or `Sx Sy Sz`, in cells, any shape) moves the lattice, so the faces cut it elsewhere: for example away from thin slivers, or with a node at the center. `python tools/check_step.py --periodic cell.step` compares the faces on opposite sides of a STEP file in OpenCASCADE (area and vertices).
+`--shift S` (or `Sx Sy Sz`, in cells, any shape) moves the lattice, so the faces cut it elsewhere: for example away from thin slivers, or with a node at the center.
+
+`--rotate AX AY AZ` (box and trimmed shapes) turns the lattice about the origin: AX degrees about x, then AY about y, then AZ about z. Use it to print without overhangs, or to line up the lattice's stiff directions with the loads. The box keeps its faces; they cut the turned cells anywhere, which leaves small pieces at the edges, so finer patch grids are needed (the search finds them; smooth STEP takes seconds to a minute). Smooth STEP of a rotated lattice keeps exact edges: merged faces of it can fail strict CAD checks (in OpenCASCADE, a face's boundary crossing itself on its surface). The orientation of each patch comes from the grid (which side of the edge is inside), as for trimmed shapes: where a wall runs nearly along a grid edge, its position would twist sound patches at any grid. `python tools/check_step.py --periodic cell.step` compares the faces on opposite sides of a STEP file in OpenCASCADE (area and vertices).
+
+## Batch runs
+
+`--sweep OPTION V1 V2 ...` runs once per value of one option that takes one value (`--density`, `--wall`, `--level`, `--cell`, `--cells`, `--type`, `--form`, `--part`, ...), with the other options unchanged. Values are listed, or given as `FROM:TO:STEP`. Each run's files get the value in their name (`lattice_density-0.2.step`); a `.csv` output collects the property reports in one table, one line per run, with the value in a first column. In the GUI, *Sweep* under Export does the same for the thickness, cell size, cell count or surface type.
 
 ## Plates and buffers
 
@@ -214,6 +236,7 @@ Optional inputs: `--material RHO [E]`, the solid's density in kg/m³ and Young's
 | Pressure drop | with `--flow`, per channel: the Reynolds number on D_h and the speed in the pores, and the pressure gradient μu/K (Darcy, viscous) + 7/6 ρu² / (ε² D_h) (Ergun's inertial term, with the packed bed's particle size written through D_h), in Pa/m and over the box along the flow axis (the channel's `--channel-buffers` or `--buffers` axis, else x). Rough packed-bed estimates for comparing designs: use CFD for design |
 | Pieces | each solid and fluid piece with its volume and the faces of the shape it touches |
 | Connects | for each pair of opposite faces (x− / x+, inner / outer, bottom / top), whether the solid and each fluid channel connect them: flow through for CFD, load path for FEA |
+| Pore size | per fluid channel, the largest sphere inside it, and for each pair of opposite faces the largest sphere that passes from one to the other (the throat that matters for powder removal and clogging). From a voxel grid in mm over the part (voxels of the mesh step, at most 8 million): each voxel's distance to the solid, then the channel's voxels joined from the farthest down until a piece touches both faces. Within about a voxel |
 
 The values come from closed meshes at `--res` steps per cell; the fluid channels are meshed one at a time. Volumes and areas are within about 1 % at the default `--res 24`: the solid volume, wetted plus cut area of a gyroid tube and torus shell match Onshape's mass properties of the smooth STEP within 1 % and 0.3 %. The report warns when walls are thinner than a mesh step; raise `--res` then.
 
@@ -226,12 +249,12 @@ The values come from closed meshes at `--res` steps per cell; the fluid channels
 | `torus-shell` | `--radius R0 R1 --major R` | `--cells radial ring tube` | cells follow the shape |
 | `sphere-shell` | `--radius R0 R1 --polar A0 A1` | `--cells radial around south-north` | cells follow the shape |
 | `cylinder` | `--radius R --height H` | `--cell L` | trimmed |
-| `sphere` | `--radius R` | `--cell L` | trimmed |
+| `sphere` | `--radius R` (hollow: `R0 R1`) | `--cell L` | trimmed |
 | `torus` | `--radius r --major R` | `--cell L` | trimmed |
 
 - **Cells follow the shape** (tube, torus shell, sphere shell): the lattice is built in a parameter box with one unit per cell and bent into the shape. No cell is cut on the curved walls, and the cell count around must be whole, so the lattice closes on itself. `--radial log` (default) keeps cells square: they grow with the radius. `--radial linear` keeps the radial cell size constant, so cells stretch around on the outside. The GUI shows the resulting cell sizes.
 - **Sphere shell**: cells that follow a sphere cannot reach its poles: there, one point would get a different lattice for each longitude. So the shell runs from A0 to A1 degrees from the +z axis (`--polar`, default 20 160) and is open around the poles. Its ends are cones from the center, or the plane z = 0 at 90 degrees (a dome: `--polar 10 90`). Around, cells narrow toward the ends, by sin A: at 20 degrees to a third of their size at the equator. For a closed spherical part, use the trimmed `sphere`.
-- **Trimmed** (cylinder, sphere, torus): a straight lattice of `--cell` cells, cut by the shape. Use this for solid shapes: bending cells around an axis or a pole would squeeze them to nothing there.
+- **Trimmed** (cylinder, sphere, torus): a straight lattice of `--cell` cells, cut by the shape. Use this for solid shapes: bending cells around an axis or a pole would squeeze them to nothing there. `--shape sphere --radius R0 R1` is a hollow sphere: a closed spherical shell, faces `inner` and `outer`.
 - Round shapes are centered at the origin with their axis along z.
 - Bending stretches cells, and stretched walls are thicker, so the solid fraction differs from `--density` (which is per unit cell). The tool samples the field and prints the real value.
 - Smooth STEP works for every shape. The faces where the lattice is cut are exact: cylinders and end planes for the tube and cylinder, tori for the torus shell and torus, a sphere for the sphere.
@@ -327,6 +350,7 @@ Merged files have 3–8 times fewer faces and are usually smaller than `--exact`
 ## Notes for NX and simulation
 
 - Face count and file size grow with the cell count. FRD and Fischer-Koch S need finer patch grids, so they give the most faces per cell.
+- Merged faces on spheres (trimmed, solid or hollow) can fail strict CAD checks the same way as rotated lattices; OpenCASCADE rejects some. Use `--exact` if your CAD rejects one.
 - Merged faces are within `--tol` of the exact surface at the patch samples and cell mid points, and within 2 × `--tol` at the points halfway between them. Finer sampling finds at most about 4 × `--tol` in between. Use a smaller `--tol` or `--exact` if that matters.
 - For the faceted path, `--res` sets the grid steps per unit cell edge. Triangle count grows with `res²`. Thin sheets need a higher `res`; the density warning tells you when it is too low.
 - Units are mm.
@@ -393,6 +417,7 @@ Channel buffers replace the caps on the faces across each channel's axis. The ot
 - **Inner cavities, smooth trimmed shapes, faster search (done):** voids (`BREP_WITH_VOIDS`) in every STEP and STL; smooth STEP for the cylinder, sphere and torus; the patch search on one cell first; OpenCASCADE checks in `ctest`.
 - **Heat exchangers and report estimates (done):** channel buffers (separate inlets and outlets per fluid channel, with header plates); mass, stiffness bounds, permeability and pressure drop estimates; CSV reports.
 - **Wall thickness and sphere shell (done):** sheets with a set wall thickness in mm; a sphere shell with cells that follow it.
+- **Batch runs, rotation, pores (done):** `--sweep`; rotated lattices; a hollow sphere; pore and throat sizes in the report; exact gradients (wall thickness 3 to 4 times faster).
 - **Next:** test the names in NX; custom formulas and more surfaces.
 - **v3:** infill of an arbitrary part, cylindrical and spherical lattices, exact minimal surfaces (Weierstrass) as an option.
 

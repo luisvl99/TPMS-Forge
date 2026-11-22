@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
+#include <numeric>
 
 namespace tpms {
 namespace {
@@ -93,6 +95,14 @@ std::pair<double, double> stiffness(const Report& r) {
 
 const char* const kAxisNames[3] = {"x", "y", "z"};
 
+// The throat of channel c along its flow axis (box), else between the first
+// pair of opposite faces; -1 if there is none.
+double flowThroat(const Report& r, int c, int axis) {
+    const auto& t = r.throat[c];
+    if (t.empty()) return -1;
+    return axis >= 0 && size_t(axis) < t.size() ? t[size_t(axis)] : t[0];
+}
+
 // Pairs of opposite faces that each piece connects, as "solid" and the
 // fluid channels.
 struct Through {
@@ -116,6 +126,197 @@ std::vector<Through> through(const Report& r) {
         out.push_back(t);
     }
     return out;
+}
+
+// Squared distance transform of f along one line of n samples, spacing 1
+// (Felzenszwalb and Huttenlocher): d[q] = min over p of (q - p)^2 + f[p].
+void distanceLine(const double* f, double* d, int n, std::vector<int>& v, std::vector<double>& z) {
+    v.resize(size_t(n)), z.resize(size_t(n) + 1);
+    int k = 0;
+    v[0] = 0, z[0] = -1e300, z[1] = 1e300;
+    for (int q = 1; q < n; ++q) {
+        double s;
+        for (;;) {
+            const int p = v[size_t(k)];
+            s = ((f[q] + double(q) * q) - (f[p] + double(p) * p)) / (2.0 * q - 2.0 * p);
+            if (s > z[size_t(k)] || k == 0) break;
+            --k;
+        }
+        v[size_t(++k)] = q, z[size_t(k)] = s, z[size_t(k) + 1] = 1e300;
+    }
+    k = 0;
+    for (int q = 0; q < n; ++q) {
+        while (z[size_t(k) + 1] < q) ++k;
+        const int p = v[size_t(k)];
+        d[q] = double(q - p) * (q - p) + f[p];
+    }
+}
+
+// Pore sizes on a voxel grid in mm over the part. A voxel is outside the
+// part, solid, or in a fluid channel; its distance to the nearest solid
+// voxel gives the largest sphere around it (outside the part is open: the
+// cut faces lead on). Per channel: the largest sphere inside it, and per
+// pair of opposite faces the largest sphere that passes between them: the
+// channel's voxels join from the farthest from the solid down, until one
+// piece touches both faces.
+void pores(const Options& o, const Lattice& lat, Report& r) {
+    const Shape& s = o.shape;
+    const Grid param = gridOf(o, 1);
+    // Bounds in mm.
+    Vec3 lo{1e300, 1e300, 1e300}, hi{-1e300, -1e300, -1e300};
+    auto grow = [&](Vec3 q) {
+        for (int a = 0; a < 3; ++a) lo[a] = std::min(lo[a], q[a]), hi[a] = std::max(hi[a], q[a]);
+    };
+    if (s.trimmed()) {
+        grow(s.half() * -1.0), grow(s.half());
+    } else {
+        const int n = s.mapped() ? 16 : 1;
+        for (int i = 0; i <= n; ++i)
+            for (int j = 0; j <= n; ++j)
+                for (int k = 0; k <= n; ++k) {
+                    const Vec3 p{param.size[0] * i / n, param.size[1] * j / n, param.size[2] * k / n};
+                    grow(s.mapped() ? s.map(p) : p);
+                }
+        if (s.mapped()) {
+            const Vec3 pad = (hi - lo) * 0.02;
+            lo = lo - pad, hi = hi + pad;
+        }
+    }
+    double h = r.step;
+    int n[3];
+    for (;;) {
+        for (int a = 0; a < 3; ++a) n[a] = std::max(2, int(std::ceil((hi[a] - lo[a]) / h)));
+        if (double(n[0]) * n[1] * n[2] <= 8e6) break;
+        h *= 1.1;  // ponytail: at most 8 million voxels; coarser for large parts
+    }
+    r.voxel = h;
+    const size_t nx = size_t(n[0]), ny = size_t(n[1]), nz = size_t(n[2]), count = nx * ny * nz;
+    auto at = [&](size_t i, size_t j, size_t k) { return Vec3{lo.x + (i + 0.5) * h, lo.y + (j + 0.5) * h, lo.z + (k + 0.5) * h}; };
+    // Where a point of the part lies in the lattice (its parameter point),
+    // or false outside the part.
+    auto inPart = [&](Vec3 q, Vec3& p) {
+        if (s.trimmed()) return p = q, s.inside(q.x, q.y, q.z) < 0;
+        p = s.mapped() ? s.unmap(q) : q;
+        for (int a = 0; a < 3; ++a)
+            if (!(param.periodic >> a & 1) && (p[a] < 0 || p[a] > param.size[a])) return false;
+        return true;
+    };
+    // The face of the shape nearest a point of the part (F = 2 axis + side).
+    auto nearestFace = [&](Vec3 q, Vec3 p) {
+        if (s.kind == ShapeKind::Cylinder)
+            return std::fabs(std::hypot(q.x, q.y) - s.r1) < 0.5 * s.height - std::fabs(q.z) ? 1 : q.z < 0 ? 4 : 5;
+        if (s.kind == ShapeKind::Sphere && s.r0 > 0) return norm(q) < 0.5 * (s.r0 + s.r1) ? 0 : 1;
+        if (s.trimmed()) return 1;
+        Vec3 J[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        if (s.mapped()) s.jacobian(p, J);
+        int best = 0;
+        double dist = 1e300;
+        for (int F = 0; F < 6; ++F) {
+            const int a = F / 2;
+            if (param.periodic >> a & 1) continue;
+            const double d = std::fabs(p[a] - (F % 2) * param.size[a]) * norm(J[a]);
+            if (d < dist) dist = d, best = F;
+        }
+        return best;
+    };
+    // Labels: -1 outside, 0 solid, 1 channel A (or a network's fluid), 2 channel B.
+    std::vector<int8_t> label(count);
+#pragma omp parallel for schedule(dynamic)
+    for (int k = 0; k < n[2]; ++k)
+        for (size_t j = 0; j < ny; ++j)
+            for (size_t i = 0; i < nx; ++i) {
+                Vec3 p;
+                int8_t l = -1;
+                if (inPart(at(i, j, size_t(k)), p)) {
+                    const double f = lat.value(p.x, p.y, p.z), c = lat.levelAt(p.x, p.y, p.z);
+                    l = f > c ? 1 : lat.form == Form::Sheet && f < -c ? 2 : 0;
+                }
+                label[(size_t(k) * ny + j) * nx + i] = l;
+            }
+    // Squared distance to the nearest solid voxel, in voxels: three passes.
+    std::vector<double> d2(count);
+    for (size_t v = 0; v < count; ++v) d2[v] = label[v] == 0 ? 0 : 1e18;
+    const size_t stride[3] = {1, nx, nx * ny};
+    for (int a = 0; a < 3; ++a) {
+        const size_t len = size_t(n[a]), lines = count / len;
+#pragma omp parallel
+        {
+            std::vector<double> f(len), d(len), z;
+            std::vector<int> v;
+#pragma omp for
+            for (long line = 0; line < long(lines); ++line) {
+                // The first sample of this line: lines run along axis a.
+                const size_t l = size_t(line), b = (a + 1) % 3, c = (a + 2) % 3;
+                const size_t ib = l % size_t(n[b]), ic = l / size_t(n[b]);
+                const size_t first = ib * stride[b] + ic * stride[c];
+                for (size_t q = 0; q < len; ++q) f[q] = d2[first + q * stride[a]];
+                distanceLine(f.data(), d.data(), int(len), v, z);
+                for (size_t q = 0; q < len; ++q) d2[first + q * stride[a]] = d[q];
+            }
+        }
+    }
+    // Pairs of opposite faces, as in r.opposite.
+    std::vector<std::pair<int, int>> pairs;
+    for (const auto& [a, b] : r.opposite) {
+        int fa = -1, fb = -1;
+        for (int F = 0; F < 6; ++F) {
+            if (a == s.faceName(F)) fa = F;
+            if (b == s.faceName(F)) fb = F;
+        }
+        pairs.push_back({fa, fb});
+    }
+    // Per channel: the largest sphere, and the bottleneck between each pair.
+    std::vector<int> parent(count), bits(count);
+    for (int ch = 1; ch <= r.channels; ++ch) {
+        std::vector<size_t> order;
+        for (size_t v = 0; v < count; ++v)
+            if (label[v] == ch) order.push_back(v);
+        auto radius = [&](size_t v) { return std::max(0.0, (std::sqrt(d2[v]) - 0.5) * h); };  // to the wall, about
+        std::vector<double>& through = r.throat[ch - 1];
+        through.assign(pairs.size(), 0);
+        if (order.empty()) continue;
+        std::sort(order.begin(), order.end(), [&](size_t x, size_t y) { return d2[x] > d2[y]; });
+        r.pore[ch - 1] = 2 * radius(order[0]);
+        std::fill(parent.begin(), parent.end(), -1);
+        auto find = [&](int x) {
+            while (parent[size_t(x)] != x) x = parent[size_t(x)] = parent[size_t(parent[size_t(x)])];
+            return x;
+        };
+        size_t left = pairs.size();
+        for (size_t v : order) {
+            if (!left) break;
+            parent[v] = int(v);
+            const size_t i = v % nx, j = v / nx % ny, k = v / (nx * ny);
+            int faces = 0;  // on the part's boundary: next to outside, or the grid's edge
+            const bool edge = i == 0 || j == 0 || k == 0 || i + 1 == nx || j + 1 == ny || k + 1 == nz;
+            bool boundary = edge;
+            const long step[6] = {-1, 1, -long(nx), long(nx), -long(nx * ny), long(nx * ny)};
+            const bool can[6] = {i > 0, i + 1 < nx, j > 0, j + 1 < ny, k > 0, k + 1 < nz};
+            for (int q = 0; q < 6; ++q)
+                if (can[q] && label[size_t(long(v) + step[q])] < 0) boundary = true;
+            if (boundary) {
+                Vec3 p;
+                const Vec3 q = at(i, j, k);
+                inPart(q, p);
+                faces = 1 << nearestFace(q, p);
+            }
+            int root = int(v);
+            bits[v] = faces;
+            for (int q = 0; q < 6; ++q) {
+                if (!can[q]) continue;
+                const size_t u = size_t(long(v) + step[q]);
+                if (label[u] != ch || parent[u] < 0) continue;
+                const int other = find(int(u));
+                if (other == root) continue;
+                parent[size_t(other)] = root, bits[size_t(root)] |= bits[size_t(other)];
+            }
+            for (size_t pi = 0; pi < pairs.size(); ++pi) {
+                const auto [fa, fb] = pairs[pi];
+                if (through[pi] > 0 || fa < 0 || fb < 0) continue;
+                if ((bits[size_t(root)] >> fa & 1) && (bits[size_t(root)] >> fb & 1)) through[pi] = 2 * radius(v), --left;
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -157,6 +358,13 @@ Report makeReport(const Options& o, const Lattice& lat, int res) {
             const double tol = 0.05 * h;
             return int(std::fabs(std::hypot(p.x, p.y) - s.r1) < tol) | int(std::fabs(p.z + 0.5 * s.height) < tol) << 1 |
                    int(std::fabs(p.z - 0.5 * s.height) < tol) << 2;
+        };
+    } else if (s.kind == ShapeKind::Sphere && s.r0 > 0) {  // hollow
+        names = {"inner", "outer"};
+        r.opposite.push_back({"inner", "outer"});
+        facesAt = [&](Vec3 p) {
+            const double tol = 0.05 * h;
+            return int(std::fabs(norm(p) - s.r0) < tol) | int(std::fabs(norm(p) - s.r1) < tol) << 1;
         };
     } else {
         names = {"surface"};
@@ -257,6 +465,7 @@ Report makeReport(const Options& o, const Lattice& lat, int res) {
     auto bigFirst = [](const ReportPiece& a, const ReportPiece& b) { return a.volume > b.volume; };
     std::sort(r.solids.begin(), r.solids.end(), bigFirst);
     std::sort(r.fluids.begin(), r.fluids.end(), bigFirst);
+    pores(o, lat, r);
     return r;
 }
 
@@ -300,6 +509,19 @@ std::vector<std::pair<std::string, std::string>> reportRows(const Report& r, con
         const std::string who = flows.size() == 2 ? "channel " + f.name + ": " : "";
         row(k ? "" : "Permeability", "%s%.3g m^2 (Kozeny-Carman: porosity %.3f, Dh %.3g mm)", who.c_str(),
             f.permeability, f.porosity, f.dh);
+    }
+    for (int c = 0; c < r.channels; ++c) {  // largest spheres: inside, and through each pair of faces
+        const std::string who = r.channels == 2 ? std::string("channel ") + channelName(c) + ": " : "";
+        std::string through;
+        for (size_t k = 0; k < r.opposite.size(); ++k) {
+            char b[96], size[32] = "none";
+            if (r.throat[c][k] > 0) std::snprintf(size, sizeof size, "%.3g mm", r.throat[c][k]);
+            std::snprintf(b, sizeof b, "%s%s to %s %s", k ? ", " : "; through ", r.opposite[k].first.c_str(),
+                          r.opposite[k].second.c_str(), size);
+            through += b;
+        }
+        row(c ? "" : "Pore size", "%s%.3g mm inside%s (largest spheres, voxels of %.2g mm)", who.c_str(), r.pore[c],
+            through.c_str(), r.voxel);
     }
     for (size_t k = 0; k < flows.size() && o.flow[0] > 0; ++k) {
         const ChannelFlow& f = flows[k];
@@ -370,7 +592,12 @@ bool writeReportJson(const std::string& path, const Report& r, const Options& o,
         const ChannelFlow& f = flows[c];
         channels += std::string(c ? ",\n              " : "") + "{\"name\": " + quoted(f.name) + ", \"volume_mm3\": " +
                     num(f.volume) + ", \"wetted_area_mm2\": " + num(f.area) + ", \"porosity\": " + num(f.porosity) +
-                    ", \"hydraulic_diameter_mm\": " + num(f.dh) + ", \"permeability_m2\": " + num(f.permeability);
+                    ", \"hydraulic_diameter_mm\": " + num(f.dh) + ", \"permeability_m2\": " + num(f.permeability) +
+                    ", \"pore_mm\": " + num(r.pore[c]);
+        std::vector<std::string> throats;
+        for (size_t k = 0; k < r.opposite.size(); ++k)
+            throats.push_back(quoted(r.opposite[k].first + " " + r.opposite[k].second) + ": " + num(r.throat[c][k]));
+        channels += ", \"throat_mm\": {" + joined(throats, ", ") + "}";
         if (o.flow[0] > 0) {
             channels += ", \"reynolds\": " + num(f.re) + ", \"pressure_gradient_pa_per_m\": " + num(f.gradient) +
                         ", \"viscous_gradient_pa_per_m\": " + num(f.viscous);
@@ -472,6 +699,8 @@ bool writeReportCsv(const std::string& path, const Report& r, const Options& o, 
         val(p + "porosity", f.porosity, has);
         val(p + "hydraulic_diameter_mm", f.dh, has);
         val(p + "permeability_m2", f.permeability, has);
+        val(p + "pore_mm", has ? r.pore[c] : 0, has);
+        val(p + "throat_mm", has ? flowThroat(r, int(c), f.axis) : 0, has && flowThroat(r, int(c), f.axis) >= 0);
         val(p + "reynolds", f.re, has && flow);
         val(p + "pressure_gradient_pa_per_m", f.gradient, has && flow);
         val(p + "pressure_drop_pa", f.drop, has && flow && f.axis >= 0);
