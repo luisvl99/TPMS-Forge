@@ -6,13 +6,19 @@
 
 TPMS Forge (TPMS-F for short) turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface. There is a command-line tool, `tpms-forge`, and a desktop app with a live 3D preview, `tpms-forge-gui`.
 
+![One cell of each surface type: gyroid, Schwarz P, diamond, I-WP, FRD, Fischer-Koch S and Neovius](docs/surfaces.png)
+
+Seven surface types, each as a sheet or a network, as the solid or as the fluid around it.
+
 **Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube, torus shell or sphere shell with cells that follow the curvature, or a cylinder, sphere or torus cut from a straight lattice; every shape has smooth STEP. Density, wall thickness (in mm) and cell size can be graded, and a property report gives volumes, wetted area, hydraulic diameters and wall thickness for CFD and FEA. Every STEP file is checked as a valid closed solid in OpenCASCADE by the tests, and the files import into Onshape.
 
 **Download:** Windows executables (`tpms-forge.exe` and `tpms-forge-gui.exe`, nothing to install) and the user guide are on the [Releases](../../releases/latest) page. On other systems, [build from source](#build).
 
-![tpms-forge-gui](docs/gui.png)
+![tpms-forge-gui with the property report open](docs/gui.png)
 
-The [user guide](docs/tpms-forge-user-guide.pdf) (PDF) shows every capability with pictures and walks through common workflows. Rebuild it after changes with `python tools/user_guide.py` (needs `reportlab` and `pillow`, and a built `tpms-forge-gui` for the screenshots). The banner above and the program icon come from `tools/render_images.py` (run it with the Python of the OpenCASCADE checks, which has VTK).
+`tpms-forge-gui`: every option on the left, the live 3D preview on the right, and the property report (volumes, wetted area, hydraulic diameters, wall thickness, pore size, permeability, stiffness).
+
+The [user guide](docs/tpms-forge-user-guide.pdf) (PDF) shows every capability with pictures and walks through common workflows. Rebuild it after changes with `python tools/user_guide.py` (needs `reportlab` and `pillow`, and a built `tpms-forge-gui` for the screenshots). The banner, the surface pictures and the program icon come from `tools/render_images.py` (run it with the Python of the OpenCASCADE checks, which has VTK).
 
 ## GUI
 

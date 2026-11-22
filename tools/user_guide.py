@@ -3,7 +3,8 @@
 Needs: python -m pip install reportlab pillow, and a built tpms-forge-gui.
 Usage: python tools/user_guide.py [--no-shots]
 
-The screenshots go to build/guide; --no-shots reuses them. Fonts: Segoe UI
+The screenshots go to build/guide; --no-shots reuses them. The one with the
+property report is also the README's picture of the GUI, docs/gui.png. Fonts: Segoe UI
 and Consolas (Windows), else DejaVu (matplotlib's copy).
 """
 import os
@@ -68,6 +69,7 @@ def take_shots():
         PILImage.open(ppm).save(SHOTS / f"{name}.png")
         ppm.unlink()
         print("screenshot", name)
+    PILImage.open(SHOTS / "report.png").save(ROOT / "docs" / "gui.png", optimize=True)
 
 
 def view(name):

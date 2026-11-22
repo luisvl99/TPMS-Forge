@@ -1,5 +1,6 @@
 """Renders the README banner, docs/banner.png (also GitHub's social preview
-image), and the program icon, src/tpms.ico, from models that build/tpms-forge makes.
+image), the gallery of surface types, docs/surfaces.png, and the program icon,
+src/tpms.ico, from models that build/tpms-forge makes.
 
 Needs the project's .venv (VTK comes with cadquery-ocp) and a built tpms-forge.
 Usage: .venv/Scripts/python tools/render_images.py   (.venv/bin/python elsewhere)
@@ -172,25 +173,58 @@ def banner():
     img.convert("RGB").resize((W // 2, H // 2), Image.LANCZOS).save(ROOT / "docs" / "banner.png", optimize=True)
 
 
-def icon():
-    mesh = model("cell", "--type gyroid --cells 1 --density 0.35 --res 48")
+def gradient(size):
+    """The background: TOP at the top, BOTTOM at the bottom."""
+    rows = np.linspace(0, 1, size[1])[:, None, None]
+    shade = np.asarray(TOP) * (1 - rows) + np.asarray(BOTTOM) * rows
+    return Image.fromarray((np.broadcast_to(shade, (size[1], size[0], 3)) * 255).astype(np.uint8)).convert("RGBA")
+
+
+def cell_picture(name, args, side):
+    """One cell of a lattice, seen from a corner, on a transparent square of the given side."""
+    mesh = model(name, args)
     paint(mesh, (0.3, 0.2, 1))
     img, _ = render([actor(mesh, (0, 0, 0), 2, (0, 0, 0))], (1024, 1024), (6, -6, 5), (0, 0, 0), 22, False)
     img = img.crop(img.getbbox())
-    img = img.resize((round(img.width * 212 / max(img.size)), round(img.height * 212 / max(img.size))), Image.LANCZOS)
-    # On a dark rounded tile, as the banner, so it reads on light and dark backgrounds.
-    rows = np.linspace(0, 1, 256)[:, None, None]
-    shade = np.asarray(TOP) * (1 - rows) + np.asarray(BOTTOM) * rows
-    tile = Image.fromarray((np.broadcast_to(shade, (256, 256, 3)) * 255).astype(np.uint8)).convert("RGBA")
+    scale = side / max(img.size)
+    img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
+    square = Image.new("RGBA", (side, side))
+    square.alpha_composite(img, ((side - img.width) // 2, (side - img.height) // 2))
+    return square
+
+
+def surfaces():
+    """One sheet cell of each surface type, in rows of 4, labeled."""
+    types = [("gyroid", "Gyroid"), ("schwarz-p", "Schwarz P"), ("diamond", "Diamond"), ("iwp", "I-WP"),
+             ("frd", "FRD"), ("fischer-koch-s", "Fischer-Koch S"), ("neovius", "Neovius")]
+    tile, label, margin = 400, 70, 80  # twice the final size
+    W = 4 * tile + 2 * margin
+    img = gradient((W, 2 * (tile + label) + margin))
+    draw = ImageDraw.Draw(img)
+    small = font(["segoeui.ttf", "DejaVuSans.ttf"], 40)
+    for k, (t, name) in enumerate(types):
+        row, col = divmod(k, 4)
+        x = margin + col * tile + (tile // 2 if row else 0)  # the last row of 3 centered
+        y = margin // 2 + row * (tile + label)
+        img.alpha_composite(cell_picture(f"cell-{t}", f"--type {t} --cells 1 --res 64", tile - 50), (x + 25, y))
+        draw.text((x + tile // 2, y + tile - 30), name, font=small, fill=(170, 180, 210), anchor="mt")
+    img.convert("RGB").resize((img.width // 2, img.height // 2), Image.LANCZOS).save(ROOT / "docs" / "surfaces.png",
+                                                                                       optimize=True)
+
+
+def icon():
+    # A gyroid cell on a dark rounded tile, as the banner, so it reads on light and dark backgrounds.
+    tile = gradient((256, 256))
     mask = Image.new("L", (256, 256))
     ImageDraw.Draw(mask).rounded_rectangle((0, 0, 255, 255), radius=52, fill=255)
     tile.putalpha(mask)
-    tile.alpha_composite(img, ((256 - img.width) // 2, (256 - img.height) // 2))
+    tile.alpha_composite(cell_picture("cell", "--type gyroid --cells 1 --density 0.35 --res 48", 212), (22, 22))
     tile.save(WORK / "icon.png")
     tile.save(ROOT / "src" / "tpms.ico", sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
 
 
 if __name__ == "__main__":
     banner()
+    surfaces()
     icon()
-    print("wrote docs/banner.png and src/tpms.ico")
+    print("wrote docs/banner.png, docs/surfaces.png and src/tpms.ico")
