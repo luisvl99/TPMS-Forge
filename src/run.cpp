@@ -17,9 +17,9 @@
 namespace tpms {
 namespace {
 
-const char* kUsage = R"(tpms - TPMS lattice to STEP / STL
+const char* kUsage = R"(tpms-forge - TPMS Forge: TPMS lattices to STEP / STL
 
-Usage: tpms [options] -o FILE [-o FILE ...]
+Usage: tpms-forge [options] -o FILE [-o FILE ...]
 
 Lattice
   --type NAME           Surface type (default gyroid). See --list.
@@ -54,8 +54,7 @@ Shape (default box)
   --rotate AX AY AZ     Box and trimmed shapes: turns the lattice about the
                         origin by AX degrees about x, then AY about y, then
                         AZ about z. For printing without overhangs, or to
-                        line up the stiff directions with the loads. Smooth
-                        STEP keeps exact edges then (more faces).
+                        line up the stiff directions with the loads.
   --plates x|y|z T [T1] box, solid: plates T mm thick on the faces at the
                         start and end of the axis (T1: at the end; 0: none),
                         fused with the lattice. Sandwich panels, walls.
@@ -136,8 +135,8 @@ Output
   -h, --help            Show this help.
 
 Examples
-  tpms --type gyroid --form sheet --density 0.25 --cell 8 --cells 4 -o gyroid.step -o gyroid.stl
-  tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.stl)";
+  tpms-forge --type gyroid --form sheet --density 0.25 --cell 8 --cells 4 -o gyroid.step -o gyroid.stl
+  tpms-forge --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.stl)";
 
 struct ShapeName {
     const char* name;
@@ -408,7 +407,7 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
         }
     }
 
-    if (!findSurface(o.type)) return error = "unknown surface type '" + o.type + "'. Run 'tpms --list'.", false;
+    if (!findSurface(o.type)) return error = "unknown surface type '" + o.type + "'. Run 'tpms-forge --list'.", false;
     if (!o.graded) o.density1 = o.density, o.level1 = o.level;
     if (!o.hasLevel && !(o.density > 0 && o.density < 1 && o.density1 > 0 && o.density1 < 1))
         return error = "--density must be in (0, 1)", false;
@@ -463,15 +462,8 @@ bool parseArgs(const std::vector<std::string>& args, Options& o, std::string& er
         if (!needsMajor && s.major) return error = "--major does not apply to --shape " + name, false;
     }
     if (polarGiven && s.kind != ShapeKind::SphereShell) return error = "--polar needs --shape sphere-shell", false;
-    if (o.rotate[0] || o.rotate[1] || o.rotate[2]) {
-        if (s.mapped() || o.unitCell)
-            return error = "--rotate works for the box (without --cell-grade or --unit-cell) and the trimmed shapes", false;
-        // ponytail: merged faces of a rotated lattice can fail strict CAD
-        // checks (a face's boundary crossing itself on its surface), so it
-        // keeps exact edges; a self-intersection check of the projected
-        // loops in merge() would let it merge.
-        o.exact = true;
-    }
+    if ((o.rotate[0] || o.rotate[1] || o.rotate[2]) && (s.mapped() || o.unitCell))
+        return error = "--rotate works for the box (without --cell-grade or --unit-cell) and the trimmed shapes", false;
     if (!(0 < polar[0] && polar[0] < polar[1] && polar[1] < 180))
         return error = "--polar needs 0 < A0 < A1 < 180 (degrees from the +z axis)", false;
     const double degree = kTwoPi / 360;
@@ -983,7 +975,7 @@ int run(const std::vector<std::string>& args, const Print& print) {
     if (o.shift[0] || o.shift[1] || o.shift[2])
         say(print, "Shift     : %g x %g x %g cells", o.shift[0], o.shift[1], o.shift[2]);
     if (lat.rotated)
-        say(print, "Rotation  : %g, %g, %g degrees about x, y, z (in that order); exact edges", o.rotate[0],
+        say(print, "Rotation  : %g, %g, %g degrees about x, y, z (in that order)", o.rotate[0],
             o.rotate[1], o.rotate[2]);
     const auto t0 = std::chrono::steady_clock::now();
     bool ok = true;

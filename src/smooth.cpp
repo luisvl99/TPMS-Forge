@@ -681,7 +681,7 @@ public:
                         for (int p : members) next.push_back({{p}, smaller});
                     continue;
                 }
-                // A single patch too curved for a height field keeps its own surface.
+                // A single patch that does not fit keeps its own surface.
                 for (int p : members) regionOf[size_t(p)] = int(regions.size());
                 regions.push_back(fitted[i] ? fit[i] : faces_[size_t(members[0])]);
             }
@@ -750,7 +750,9 @@ public:
                 if (closed) v = end(e0, false), e = e0;
                 Edge c{v, v, edges_[size_t(e)].wall, {}, {}, {}, {}, {}};
                 const int id = int(chains.size());
+                int length = 0;  // in patch edges
                 for (;;) {
+                    ++length;
                     const bool fwd = end(e, false) == v;
                     chainOf[size_t(e)] = id;
                     chainSame[size_t(e)] = fwd;
@@ -762,8 +764,12 @@ public:
                     e = otherEdge(v, e);
                 }
                 c.b = v;
+                // A single patch edge keeps its own curve, as do all edges of
+                // a kept patch: there is nothing to join, and a refit within
+                // tol / 4 can cross a neighbor edge where a face is a sliver
+                // (a wall just poking through a cut face).
                 if (c.wall < 0) fitLine(c);
-                else if (kept(pr)) {
+                else if (length == 1) {
                     c.ctrl = edges_[size_t(e)].ctrl;
                     if (!chainSame[size_t(e)]) std::reverse(c.ctrl.begin(), c.ctrl.end());
                     c.knots = spline_.knots;
@@ -1254,6 +1260,59 @@ private:
             if (v != start) return false;
             loops.push_back(l);
         }
+        // The boundary must keep clear of itself: where two parts of it
+        // that lie apart along the loops (or on two loops) come within 2 tol,
+        // the region is a sliver or pinches; where it turns back at a vertex,
+        // it has a spike around a sliver of a neighbor. On the fitted surface,
+        // which is only within tol of the exact one, the curves of those parts
+        // cross, and CAD rejects the face. Such a region is split; a single
+        // patch keeps its own surface.
+        {
+            auto direction = [&](const std::pair<int, bool>& step, bool atEnd) {
+                const auto& p = edges_[size_t(step.first)].mm;
+                const size_t m = p.size() - 1;
+                const Vec3 d = step.second ? (atEnd ? p[m] - p[m - 1] : p[1] - p[0]) : (atEnd ? p[0] - p[1] : p[m - 1] - p[m]);
+                return d * (1.0 / std::max(norm(d), 1e-300));
+            };
+            for (const Loop& l : loops)
+                for (size_t k = 0; k < l.size(); ++k)
+                    if (dot(direction(l[k], true), direction(l[(k + 1) % l.size()], false)) < -0.98) return false;
+            const double gap = 2 * tol, apart = 4 * gap;
+            struct Sample {
+                Vec3 p;
+                int loop;
+                double at;  // arc length along its loop
+            };
+            std::vector<Sample> samples;
+            std::vector<double> length(loops.size(), 0.0);
+            for (size_t li = 0; li < loops.size(); ++li)
+                for (const auto& [e, same] : loops[li]) {
+                    std::vector<Vec3> pts = edges_[size_t(e)].mm;
+                    if (!same) std::reverse(pts.begin(), pts.end());
+                    for (size_t q = 0; q + 1 < pts.size(); ++q) {
+                        samples.push_back({pts[q], int(li), length[li]});
+                        length[li] += norm(pts[q + 1] - pts[q]);
+                    }
+                }
+            auto cellOf = [&](double x) { return int64_t(std::floor(x / gap)); };
+            auto key = [](int64_t x, int64_t y, int64_t z) { return (x * 73856093) ^ (y * 19349663) ^ (z * 83492791); };
+            std::unordered_map<int64_t, std::vector<int>> grid;
+            for (size_t i = 0; i < samples.size(); ++i)
+                grid[key(cellOf(samples[i].p.x), cellOf(samples[i].p.y), cellOf(samples[i].p.z))].push_back(int(i));
+            for (const Sample& a : samples)
+                for (int dx = -1; dx <= 1; ++dx)
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dz = -1; dz <= 1; ++dz) {
+                            const auto it = grid.find(key(cellOf(a.p.x) + dx, cellOf(a.p.y) + dy, cellOf(a.p.z) + dz));
+                            if (it == grid.end()) continue;
+                            for (int j : it->second) {
+                                const Sample& b = samples[size_t(j)];
+                                if (norm(a.p - b.p) >= gap) continue;
+                                const double along = std::fabs(a.at - b.at);
+                                if (a.loop != b.loop || std::min(along, length[size_t(a.loop)] - along) > apart) return false;
+                            }
+                        }
+        }
 
         Vec3 axis;
         for (int p : members)
@@ -1478,7 +1537,8 @@ private:
     }
 
     // Newton steps onto phi = 0. Axes set in `fixed` keep their coordinate.
-    Vec3 project(int w, Vec3 p, int fixed) const {
+    // With `cell` (the low corner of a grid cell), the point stays in it.
+    Vec3 project(int w, Vec3 p, int fixed, const int* cell = nullptr) const {
         const double maxStep = 0.25 * hmin_;
         for (int it = 0; it < 50; ++it) {
             const double v = phi(w, p);
@@ -1498,6 +1558,8 @@ private:
             // A pole face is the axis or a pole: beyond it the map folds back.
             for (int F = 0; F < 6; ++F)
                 if (shape_.pole(F)) p[F / 2] = F % 2 ? std::min(p[F / 2], L_[F / 2]) : std::max(p[F / 2], 0.0);
+            if (cell)
+                for (int a = 0; a < 3; ++a) p[a] = std::clamp(p[a], cell[a] * H_[a], (cell[a] + 1) * H_[a]);
         }
         return p;
     }
@@ -1596,9 +1658,14 @@ private:
             faces |= 1 << (2 * b + (lo[b] == N_[b]));
         }
         // Start at the centroid. If Newton stalls there, start at a crossing:
-        // crossings lie next to the surface.
-        Vec3 p = project(w, sum * (1.0 / double(crossings.size())), fixed);
-        for (size_t k = 0; k < crossings.size() && std::fabs(phi(w, p)) > 1e-9; ++k) p = project(w, crossings[k], fixed);
+        // crossings lie next to the surface. A boundary square keeps its
+        // vertex inside: Newton can run along the box face to a neighbor's
+        // piece of the cut curve (past the tip of a narrow tongue of it), and
+        // the cap's loop then crosses itself.
+        const int* cell = bitCount(mask) == 2 ? lo : nullptr;
+        Vec3 p = project(w, sum * (1.0 / double(crossings.size())), fixed, cell);
+        for (size_t k = 0; k < crossings.size() && std::fabs(phi(w, p)) > 1e-9; ++k)
+            p = project(w, crossings[k], fixed, cell);
         if (bitCount(mask) == 1) {
             // A box edge: the root inside its own grid edge, by bisection.
             // Newton can run along the edge to a neighbor's root, and the

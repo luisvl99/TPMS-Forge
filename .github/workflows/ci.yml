@@ -1,0 +1,61 @@
+# Builds the CLI and the GUI on Windows (MinGW) and Linux, then runs the
+# tests, with every STEP test read back by OpenCASCADE. A pushed tag v*
+# also publishes a release with the Windows executables.
+name: CI
+on: [push, pull_request]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write  # for the release
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # CMake finds .venv in the source folder and adds the OpenCASCADE checks.
+      - name: OpenCASCADE for the checks
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/${{ runner.os == 'Windows' && 'Scripts' || 'bin' }}/python -m pip install --quiet cadquery-ocp
+      - if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-dlfcn
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build xorg-dev libgl-dev
+      - name: Build
+        run: cmake -S . -B build -G Ninja && cmake --build build
+      - name: Test
+        run: ctest --test-dir build -j 4 --output-on-failure
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpms-forge-windows
+          path: |
+            build/tpms-forge.exe
+            build/tpms-forge-gui.exe
+      - name: Release
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p tpms-forge/licenses
+          cp build/tpms-forge.exe build/tpms-forge-gui.exe docs/tpms-forge-user-guide.pdf LICENSE tpms-forge/
+          cp build/_deps/imgui-src/LICENSE.txt tpms-forge/licenses/imgui.txt
+          cp build/_deps/glfw-src/LICENSE.md tpms-forge/licenses/glfw.txt
+          7z a "tpms-forge-$GITHUB_REF_NAME-windows.zip" tpms-forge
+          gh release create "$GITHUB_REF_NAME" "tpms-forge-$GITHUB_REF_NAME-windows.zip" --title "TPMS Forge $GITHUB_REF_NAME" --generate-notes

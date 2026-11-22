@@ -1,30 +1,36 @@
-# tpms
+# TPMS Forge
 
-`tpms` turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface. There is a command-line tool, `tpms`, and a desktop app with a live 3D preview, `tpms-gui`.
+![TPMS Forge: lattices of triply periodic minimal surfaces as smooth STEP solids](docs/banner.png)
 
-**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube, torus shell or sphere shell with cells that follow the curvature, or a cylinder, sphere or torus cut from a straight lattice; every shape has smooth STEP. Density, wall thickness (in mm) and cell size can be graded, and a property report gives volumes, wetted area, hydraulic diameters and wall thickness for CFD and FEA.
+[![CI](https://github.com/luisvl99/TPMS-Forge/actions/workflows/ci.yml/badge.svg)](https://github.com/luisvl99/TPMS-Forge/actions/workflows/ci.yml)
 
-![tpms-gui](docs/gui.png)
+TPMS Forge (TPMS-F for short) turns a TPMS lattice into a STEP or STL file. TPMS stands for triply periodic minimal surface. There is a command-line tool, `tpms-forge`, and a desktop app with a live 3D preview, `tpms-forge-gui`.
 
-The [user guide](docs/tpms-user-guide.pdf) (PDF) shows every capability with pictures and walks through common workflows. Rebuild it after changes with `python tools/user_guide.py` (needs `reportlab` and `pillow`, and a built `tpms-gui` for the screenshots).
+**Status: v2.** STEP output has smooth bicubic B-spline faces that follow the exact surface within a set tolerance. STL output, and STEP with `--faceted`, are triangle meshes (the v0 path). The GUI offers every command-line option. Besides boxes, the lattice can fill a tube, torus shell or sphere shell with cells that follow the curvature, or a cylinder, sphere or torus cut from a straight lattice; every shape has smooth STEP. Density, wall thickness (in mm) and cell size can be graded, and a property report gives volumes, wetted area, hydraulic diameters and wall thickness for CFD and FEA. Every STEP file is checked as a valid closed solid in OpenCASCADE by the tests, and the files import into Onshape.
+
+**Download:** Windows executables (`tpms-forge.exe` and `tpms-forge-gui.exe`, nothing to install) and the user guide are on the [Releases](../../releases/latest) page. On other systems, [build from source](#build).
+
+![tpms-forge-gui](docs/gui.png)
+
+The [user guide](docs/tpms-forge-user-guide.pdf) (PDF) shows every capability with pictures and walks through common workflows. Rebuild it after changes with `python tools/user_guide.py` (needs `reportlab` and `pillow`, and a built `tpms-forge-gui` for the screenshots). The banner above and the program icon come from `tools/render_images.py` (run it with the Python of the OpenCASCADE checks, which has VTK).
 
 ## GUI
 
-Run `build/tpms-gui`.
+Run `build/tpms-forge-gui`.
 
 - **Left panel:** every option of the command line, grouped as Surface, Shape and Export. Numbers are typed (with − / + buttons) and clamped to valid values. Options that do not apply to the chosen output file are hidden: mesh resolution for STEP, patches and tolerance for STL.
 - **Preview:** shows the solid as you change the settings. Changes to the surface, thickness, cell size, cell count or minimum fragment rebuild it on a worker thread in about half a second. Each wall (level set) is meshed on its own, so even very thin sheets show without holes; the cuts on the box faces come from a 2D grid 4 times finer. The line above the view gives the triangle count and the solid fraction (from quasi-random samples of the field, not from the preview mesh). Pieces that the export drops as fragments are still drawn. The solid is gray. The fluid (`--part void`) is blue; the fluid of a sheet is two separate channels, one on each side of the sheet (f > c and f < −c), drawn blue and red. Drag to orbit, right-drag to pan, use the wheel to zoom, and double-click to reset the view. Axes: x red, y green, z blue (z up).
 - **Export:** writes the file on a worker thread. The log shows the same report as the command line.
-- **Property report:** volumes, wetted area, hydraulic diameters, wall thickness and connectivity of the solid and the fluid, in a table in its own window, with Copy, Save JSON and Save CSV (see [Property report](#property-report)). `tpms-gui ... --report` opens with it.
-- **Command line:** the equivalent `tpms` command, with a Copy button. Use it to repeat an export or to script one.
+- **Property report:** volumes, wetted area, hydraulic diameters, wall thickness and connectivity of the solid and the fluid, in a table in its own window, with Copy, Save JSON and Save CSV (see [Property report](#property-report)). `tpms-forge-gui ... --report` opens with it.
+- **Command line:** the equivalent `tpms-forge` command, with a Copy button. Use it to repeat an export or to script one.
 
-`tpms-gui` also takes the `tpms` options, so `tpms-gui --type diamond --density 0.3 -o d.step` (for example a copied command line) opens with those settings. `tpms-gui --screenshot FILE.ppm [options]` renders once the preview is final, saves the window as an image and quits (for docs and tests).
+`tpms-forge-gui` also takes the `tpms-forge` options, so `tpms-forge-gui --type diamond --density 0.3 -o d.step` (for example a copied command line) opens with those settings. `tpms-forge-gui --screenshot FILE.ppm [options]` renders once the preview is final, saves the window as an image and quits (for docs and tests).
 
 ## Build
 
 You need a C++17 compiler and CMake 3.20 or newer. OpenMP is used when the compiler has it: patch fitting, merging and meshing run on all cores. The command-line tool has no other dependencies. With MinGW, OpenMP is linked statically, so the `.exe` files run without MinGW DLLs.
 
-`tpms-gui` uses Dear ImGui 1.91.5 and GLFW 3.4. CMake downloads them at configure time (pinned versions, SHA-256 checked). Turn the GUI off with `-DTPMS_GUI=OFF` to build only the command-line tool without downloads.
+`tpms-forge-gui` uses Dear ImGui 1.91.5 and GLFW 3.4. CMake downloads them at configure time (pinned versions, SHA-256 checked). Turn the GUI off with `-DTPMS_GUI=OFF` to build only the command-line tool without downloads. On Linux the GUI needs the X11 and OpenGL development files (Debian and Ubuntu: `sudo apt install xorg-dev libgl-dev`).
 
 ```bash
 cmake -S . -B build -G Ninja
@@ -34,103 +40,103 @@ cmake -S . -B build -G Ninja
 cmake --build build
 ```
 
-With Visual Studio, leave out `-G Ninja` and build with `cmake --build build --config Release`.
+With Visual Studio, leave out `-G Ninja` and build with `cmake --build build --config Release`. Continuous integration builds with MinGW on Windows and gcc on Linux and runs the tests there.
 
 ## Examples
 
 Gyroid sheet, 25 % solid, 4 x 4 x 4 cells of 8 mm, written as STEP and STL:
 
 ```bash
-build/tpms --type gyroid --form sheet --density 0.25 --cell 8 --cells 4 -o gyroid.step -o gyroid.stl
+build/tpms-forge --type gyroid --form sheet --density 0.25 --cell 8 --cells 4 -o gyroid.step -o gyroid.stl
 ```
 
 Fluid domain for CFD (the box minus the solid) of the same lattice. A sheet's fluid is two channels, one on each side of the sheet, so this writes `gyroid_fluid_A.step` and `gyroid_fluid_B.step`:
 
 ```bash
-build/tpms --type gyroid --form sheet --density 0.25 --cell 8 --cells 4 --part void -o gyroid_fluid.step
+build/tpms-forge --type gyroid --form sheet --density 0.25 --cell 8 --cells 4 --part void -o gyroid_fluid.step
 ```
 
 Schwarz P network with an explicit iso level and non-cubic cells:
 
 ```bash
-build/tpms --type schwarz-p --form network --level 0.3 --cell 10 10 15 --cells 3 3 2 -o p.step
+build/tpms-forge --type schwarz-p --form network --level 0.3 --cell 10 10 15 --cells 3 3 2 -o p.step
 ```
 
 Graded: solid fraction from 0.1 to 0.4 along x, and cells that grow from 5 to 15 mm along x:
 
 ```bash
-build/tpms --density 0.1 0.4 --grade x --cell 5 --cells 4 2 2 --cell-grade x 15 -o graded.step
+build/tpms-forge --density 0.1 0.4 --grade x --cell 5 --cells 4 2 2 --cell-grade x 15 -o graded.step
 ```
 
 Gyroid sheet with walls 0.5 mm thick (nearly constant; the solid fraction follows):
 
 ```bash
-build/tpms --wall 0.5 --cell 8 --cells 4 -o gyroid_wall.step
+build/tpms-forge --wall 0.5 --cell 8 --cells 4 -o gyroid_wall.step
 ```
 
 Sphere shell, 15 to 25 mm radius, with cells that follow it, from 20 to 160 degrees from the +z axis:
 
 ```bash
-build/tpms --shape sphere-shell --radius 15 25 --cells 1 12 5 --polar 20 160 -o shell.step
+build/tpms-forge --shape sphere-shell --radius 15 25 --cells 1 12 5 --polar 20 160 -o shell.step
 ```
 
 Unit cell of a Schwarz P network for homogenization, shifted half a cell so a node sits at its center:
 
 ```bash
-build/tpms --unit-cell --type schwarz-p --form network --density 0.3 --shift 0.5 -o p_cell.step
+build/tpms-forge --unit-cell --type schwarz-p --form network --density 0.3 --shift 0.5 -o p_cell.step
 ```
 
 Property report of a tube, printed and written as JSON:
 
 ```bash
-build/tpms --shape tube --radius 10 20 --height 20 --cells 1 8 2 --report -o tube.json
+build/tpms-forge --shape tube --radius 10 20 --height 20 --cells 1 8 2 --report -o tube.json
 ```
 
 Fluid domain with 10 mm inlet and outlet buffers along x, for CFD:
 
 ```bash
-build/tpms --part void --buffers x 10 -o channel_fluid.step
+build/tpms-forge --part void --buffers x 10 -o channel_fluid.step
 ```
 
 Sandwich panel: the lattice with 1.5 mm plates on top and bottom:
 
 ```bash
-build/tpms --plates z 1.5 -o panel.step
+build/tpms-forge --plates z 1.5 -o panel.step
 ```
 
 Cross-flow heat exchanger: channel A flows along x, channel B along y, each with 10 mm inlet and outlet buffers behind 1 mm header plates. The fluid goes to `hx_fluid_A.step` and `hx_fluid_B.step`; the solid, with the plates, to `hx_solid.step`:
 
 ```bash
-build/tpms --part void --channel-buffers x y 10 1 -o hx_fluid.step
+build/tpms-forge --part void --channel-buffers x y 10 1 -o hx_fluid.step
 ```
 
 ```bash
-build/tpms --channel-buffers x y 10 1 -o hx_solid.step
+build/tpms-forge --channel-buffers x y 10 1 -o hx_solid.step
 ```
 
 Batch: one model per solid fraction from 0.1 to 0.3, and one table of their reports (`gyroid_density-0.1.step`, ..., `results.csv`):
 
 ```bash
-build/tpms --sweep --density 0.1:0.3:0.05 -o gyroid.step -o results.csv
+build/tpms-forge --sweep --density 0.1:0.3:0.05 -o gyroid.step -o results.csv
 ```
 
 Lattice turned 30 degrees about x and 20 about y inside a box, and a hollow sphere of straight cells:
 
 ```bash
-build/tpms --rotate 30 20 0 -o turned.step
+build/tpms-forge --rotate 30 20 0 -o turned.step
 ```
 
 ```bash
-build/tpms --shape sphere --radius 6 12 -o hollow.step
+build/tpms-forge --shape sphere --radius 6 12 -o hollow.step
 ```
 
 Report with mass, stiffness and pressure drop estimates for Ti-6Al-4V (4430 kg/m³, 114 GPa) and water at 0.1 m/s, as CSV:
 
 ```bash
-build/tpms --material 4430 114 --flow 0.1 --report -o report.csv
+build/tpms-forge --material 4430 114 --flow 0.1 --report -o report.csv
 ```
 
-Run `build/tpms --help` for all options. Run `build/tpms --list` for all surface types.
+Run `build/tpms-forge --help` for all options. Run `build/tpms-forge --list` for all surface types.
 
 ## Surface types
 
@@ -173,7 +179,7 @@ All surfaces are level-set (nodal) approximations with period 2π. The CLI maps 
 
 `--shift S` (or `Sx Sy Sz`, in cells, any shape) moves the lattice, so the faces cut it elsewhere: for example away from thin slivers, or with a node at the center.
 
-`--rotate AX AY AZ` (box and trimmed shapes) turns the lattice about the origin: AX degrees about x, then AY about y, then AZ about z. Use it to print without overhangs, or to line up the lattice's stiff directions with the loads. The box keeps its faces; they cut the turned cells anywhere, which leaves small pieces at the edges, so finer patch grids are needed (the search finds them; smooth STEP takes seconds to a minute). Smooth STEP of a rotated lattice keeps exact edges: merged faces of it can fail strict CAD checks (in OpenCASCADE, a face's boundary crossing itself on its surface). The orientation of each patch comes from the grid (which side of the edge is inside), as for trimmed shapes: where a wall runs nearly along a grid edge, its position would twist sound patches at any grid. `python tools/check_step.py --periodic cell.step` compares the faces on opposite sides of a STEP file in OpenCASCADE (area and vertices).
+`--rotate AX AY AZ` (box and trimmed shapes) turns the lattice about the origin: AX degrees about x, then AY about y, then AZ about z. Use it to print without overhangs, or to line up the lattice's stiff directions with the loads. The box keeps its faces; they cut the turned cells anywhere, which leaves small pieces at the edges, so finer patch grids are needed (the search finds them; smooth STEP takes seconds to a minute). The orientation of each patch comes from the grid (which side of the edge is inside), as for trimmed shapes: where a wall runs nearly along a grid edge, its position would twist sound patches at any grid. `python tools/check_step.py --periodic cell.step` compares the faces on opposite sides of a STEP file in OpenCASCADE (area and vertices).
 
 ## Batch runs
 
@@ -262,7 +268,7 @@ The values come from closed meshes at `--res` steps per cell; the fluid channels
 Example: a gyroid tube, 15 to 25 mm radius, 30 mm long, 12 cells around:
 
 ```bash
-build/tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.step
+build/tpms-forge --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.step
 ```
 
 ## STEP options
@@ -313,20 +319,19 @@ Results for 2 x 2 x 2 cells at density 0.3 (sheet and network, solid and void):
 
 Curved shapes at density 0.3, merged faces: a tube (radius 10 to 20 mm, 10 mm long, 1 x 6 x 1 cells; all 28 cases) and a torus shell (radius 4 to 10 mm, major radius 25 mm, 1 x 12 x 4 cells; sheet solid and network void of each type):
 
-- Everything reads as valid closed solids except the Neovius sheets: some faces get edges that OpenCASCADE splits on reading. Use `--exact` for Neovius sheets on curved shapes until this is fixed. The volumes match the solid fraction the tool prints: for the gyroid sheet tube, solid 2 817.5 mm³ + void 6 607.3 mm³ = 9 424.8 mm³ = π (20² − 10²) × 10.
+- Everything reads as valid closed solids. The volumes match the solid fraction the tool prints: for the gyroid sheet tube, solid 2 817.5 mm³ + void 6 607.3 mm³ = 9 424.8 mm³ = π (20² − 10²) × 10.
 - The Neovius network at this density is isolated blobs, so its void part has inner cavities, written as voids.
 
 Trimmed shapes, merged faces (cylinder radius 10 mm, 20 mm long; sphere radius 10 mm; torus radius 6 mm, major radius 20 mm; 10 mm cells):
 
 - All read as valid closed solids, with volumes within 0.05 % of the tool's: gyroid, diamond and I-WP sheets, gyroid and Schwarz P networks, solid and fluid (fluid as two files per sheet).
-- The exception is the diamond sphere: a wall passes 0.3 mm from the center, where the spherical coordinates meet, and no patch count up to 16 fits it. With `--shift 0.13 0.21 0.07` it works (15 patches per cell).
-- They need more patches per cell than a box (4–15), so they are slower: the cylinder takes about a second, the sphere and torus from seconds to minutes (gyroid torus: 10 patches per cell, 580 faces, 49 s).
+- They need more patches per cell than a box (4–16), so they are slower: the cylinder takes about a second, the sphere and torus seconds (gyroid torus: 7 patches per cell, 639 faces, 6 s on 20 cores).
 
 | Faces, merged (`--exact`) | tube, 1 x 6 x 1 cells | torus shell, 1 x 12 x 4 cells |
 |---|---|---|
 | gyroid sheet | 354 (1 262) | 3 055 (8 582) |
 | Schwarz P sheet | 171 (952) | 1 661 (6 880) |
-| FRD sheet | 1 611 (10 578) | 12 022 (80 868) |
+| FRD sheet | 1 611 (10 578) | 12 244 (80 868) |
 
 On 20 cores, the gyroid torus shell takes 4 s (49 MB) and the FRD sheet torus shell (80 868 patches) 54 s (205 MB).
 
@@ -350,7 +355,6 @@ Merged files have 3–8 times fewer faces and are usually smaller than `--exact`
 ## Notes for NX and simulation
 
 - Face count and file size grow with the cell count. FRD and Fischer-Koch S need finer patch grids, so they give the most faces per cell.
-- Merged faces on spheres (trimmed, solid or hollow) can fail strict CAD checks the same way as rotated lattices; OpenCASCADE rejects some. Use `--exact` if your CAD rejects one.
 - Merged faces are within `--tol` of the exact surface at the patch samples and cell mid points, and within 2 × `--tol` at the points halfway between them. Finer sampling finds at most about 4 × `--tol` in between. Use a smaller `--tol` or `--exact` if that matters.
 - For the faceted path, `--res` sets the grid steps per unit cell edge. Triangle count grows with `res²`. Thin sheets need a higher `res`; the density warning tells you when it is too low.
 - Units are mm.
@@ -370,8 +374,8 @@ Merged files have 3–8 times fewer faces and are usually smaller than `--exact`
 9. Merge patches into large faces (skipped with `--exact`):
    - Group neighbor patches of one wall into regions. The tool keeps merging the pair with the narrowest combined normal cone, while all normals stay within 82° of the region's mean normal. A region is then a height field over the plane normal to that mean.
    - Fit one bicubic B-spline height field per region by least squares (banded Cholesky) over a rectangle along the region's principal directions, with a net shaped like the rectangle. The data are points on the exact surface: the patch samples and the cell mid points projected onto the surface. Control points are added (20 % per step) until every data point is within `tol` of the fit (distance to the tangent plane, not height: on steep parts the height difference is up to 7 times larger) and the points halfway between them within 2 × `tol` of the exact surface. A small second-difference penalty fills the parts of the rectangle outside the region.
-   - A region that does not fit is grouped again with a 15° smaller cone. A region fails if it folds over itself, touches itself at a vertex, or has more than one outer loop. A single patch that is too curved for a height field keeps its own surface.
-   - Join the patch edges between the same two faces into one B-spline curve within `tol` / 4. Chains end at kinks sharper than 30°: one curve cannot follow a corner. Zero-length edges (two corners on one point, e.g. on a mirror plane) are collapsed.
+   - A region that does not fit is grouped again with a 15° smaller cone. A region fails if it folds over itself, touches itself at a vertex, has more than one outer loop, or its boundary comes within 2 × `tol` of itself: a sliver, a pinch, or a spike that turns back at a vertex. On the fitted surface, which is only within `tol` of the exact one, the curves of those parts would cross. A single patch that fails keeps its own surface.
+   - Join the patch edges between the same two faces into one B-spline curve within `tol` / 4. Chains end at kinks sharper than 30°: one curve cannot follow a corner. A chain of a single patch edge keeps that edge's own curve: refitting it gains nothing, and within `tol` / 4 it could cross a neighbor edge where a face is a sliver (a wall that just pokes through a cut face). Zero-length edges (two corners on one point, e.g. on a mirror plane) are collapsed.
    - The STEP uncertainty is set to `tol`, so readers accept the edge gaps.
 10. Write STEP AP214: `B_SPLINE_SURFACE_WITH_KNOTS` faces, `B_SPLINE_CURVE_WITH_KNOTS` edges, `PLANE` caps with `LINE` edges on the box.
 
@@ -407,7 +411,7 @@ Channel buffers replace the caps on the faces across each channel's axis. The ot
 
 - **v1 (done):** smooth STEP with B-spline faces, error checked against the exact implicit function, shared boundary curves.
 - **v1 merged faces (done):** 3–8 times fewer faces through trimmed height-field regions.
-- **Next for v1:** test import in NX; fix merged Neovius sheets on curved shapes.
+- **Next for v1:** test import in NX (Onshape imports the files).
 - **v2 (done):** GUI with every command-line option and a live preview.
 - **Curved shapes, phase 1 (done):** tube and torus shell with cells that follow the shape; trimmed cylinder, sphere and torus; preview, STL and faceted STEP.
 - **Curved shapes, phase 2 (done):** smooth STEP for the tube and torus shell, with exact cylinder, torus and plane caps.
@@ -423,4 +427,4 @@ Channel buffers replace the caps on the faces across each channel's axis. The ot
 
 ## License
 
-MIT: see [LICENSE](LICENSE).
+MIT: see [LICENSE](LICENSE). `tpms-forge-gui` includes [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and [GLFW](https://www.glfw.org) (zlib license); the release zip has their license texts.

@@ -1,6 +1,6 @@
-"""Builds the user guide, docs/tpms-user-guide.pdf, with screenshots of tpms-gui.
+"""Builds the user guide, docs/tpms-forge-user-guide.pdf, with screenshots of tpms-forge-gui.
 
-Needs: python -m pip install reportlab pillow, and a built tpms-gui.
+Needs: python -m pip install reportlab pillow, and a built tpms-forge-gui.
 Usage: python tools/user_guide.py [--no-shots]
 
 The screenshots go to build/guide; --no-shots reuses them. Fonts: Segoe UI
@@ -26,10 +26,10 @@ from reportlab.platypus.tableofcontents import TableOfContents
 
 ROOT = Path(__file__).resolve().parent.parent
 SHOTS = ROOT / "build" / "guide"
-OUT = ROOT / "docs" / "tpms-user-guide.pdf"
-GUI = ROOT / "build" / ("tpms-gui.exe" if os.name == "nt" else "tpms-gui")
+OUT = ROOT / "docs" / "tpms-forge-user-guide.pdf"
+GUI = ROOT / "build" / ("tpms-forge-gui.exe" if os.name == "nt" else "tpms-forge-gui")
 
-# Screenshots: name, tpms options.
+# Screenshots: name, tpms-forge options.
 VIEWS = [
     ("gui", "--type gyroid --density 0.2"),
     ("t-gyroid", "--type gyroid --cells 1"),
@@ -234,7 +234,7 @@ def gallery(items, columns, height=None):
 class Guide(BaseDocTemplate):
     def __init__(self, path):
         super().__init__(str(path), pagesize=A4, leftMargin=20 * mm, rightMargin=20 * mm, topMargin=20 * mm,
-                         bottomMargin=20 * mm, title="tpms user guide",
+                         bottomMargin=20 * mm, title="TPMS Forge user guide",
                          subject="TPMS lattices as smooth STEP and STL", creator="tools/user_guide.py")
         frame = Frame(self.leftMargin, self.bottomMargin, self.width, self.height, id="body")
         self.addPageTemplates([PageTemplate("cover", [frame]),
@@ -249,7 +249,7 @@ class Guide(BaseDocTemplate):
         canvas.line(20 * mm, y + 4 * mm, A4[0] - 20 * mm, y + 4 * mm)
         canvas.setFont("Body", 8)
         canvas.setFillColor(colors.HexColor("#5A6B7C"))
-        canvas.drawString(20 * mm, y, "tpms user guide")
+        canvas.drawString(20 * mm, y, "TPMS Forge user guide")
         canvas.drawRightString(A4[0] - 20 * mm, y, str(doc.page))
         canvas.restoreState()
 
@@ -283,17 +283,18 @@ def build():
     s = []
 
     # Cover
-    s += [Spacer(1, 30 * mm), P("tpms", "title"), Spacer(1, 4),
+    s += [Spacer(1, 30 * mm), P("TPMS Forge", "title"), Spacer(1, 4),
           P("TPMS lattices as smooth STEP and STL<br/>for CAD, CFD and FEA", "subtitle"), Spacer(1, 4),
           P('<font color="#5A6B7C">User guide · November 2026</font>'), Spacer(1, 14 * mm)]
     s += gallery([(v["hx-void"], "Two-fluid heat exchanger: each channel with its own inlet and outlet"),
                   (v["s-torus-shell"], "Gyroid sheet bent into a torus shell")], 2, height=70 * mm)
     s += [Spacer(1, 10 * mm),
-          P("<b>tpms</b> turns triply periodic minimal surface (TPMS) lattices into CAD files. Its STEP files "
-            "have smooth B-spline faces that follow the exact surface within a set tolerance, so CAD systems "
-            "such as Siemens NX import them as valid closed solids, ready for meshing. It also writes STL "
-            "and faceted STEP meshes. A command-line tool, <b>tpms</b>, and a desktop app with a live 3D "
-            "preview, <b>tpms-gui</b>, offer the same options."),
+          P("<b>TPMS Forge</b> (TPMS-F for short) turns triply periodic minimal surface (TPMS) lattices into "
+            "CAD files. Its STEP files have smooth B-spline faces that follow the exact surface within a set "
+            "tolerance, and CAD systems import them as valid closed solids (checked in OpenCASCADE and "
+            "Onshape), ready for meshing. It also writes STL "
+            "and faceted STEP meshes. A command-line tool, <b>tpms-forge</b>, and a desktop app with a live 3D "
+            "preview, <b>tpms-forge-gui</b>, offer the same options."),
           NextPageTemplate("page"), PageBreak()]
 
     # Contents
@@ -306,8 +307,8 @@ def build():
     s += [Paragraph("Contents", ST["contents"]), toc]
 
     # 1 Overview
-    s += H1("What tpms does")
-    s.append(P("A TPMS lattice is built from a periodic surface f(x, y, z) = 0, repeated cell by cell. tpms "
+    s += H1("What TPMS Forge does")
+    s.append(P("A TPMS lattice is built from a periodic surface f(x, y, z) = 0, repeated cell by cell. TPMS Forge "
                "makes the solid around that surface (a sheet) or on one side of it (a network), fills a box or "
                "a curved shape with it, and writes it as a file that CAD, CFD and FEA tools read directly."))
     s += bullets([
@@ -356,15 +357,15 @@ def build():
                "(pinned versions, checked by SHA-256)."))
     s += code("cmake -S . -B build -G Ninja\ncmake --build build")
     s += bullets([
-        f"The programs are {c('build/tpms')} and {c('build/tpms-gui')} ({c('.exe')} on Windows). With MinGW they "
-        "are linked statically and run without extra DLLs.",
+        f"The programs are {c('build/tpms-forge')} and {c('build/tpms-forge-gui')} ({c('.exe')} on Windows). "
+        "With MinGW they are linked statically and run without extra DLLs.",
         f"With Visual Studio, leave out {c('-G Ninja')} and build with {c('cmake --build build --config Release')}.",
         f"{c('-DTPMS_GUI=OFF')} builds only the command-line tool, without downloads.",
         f"{c('ctest')} in the build folder runs the test suite.",
     ])
     s += H2("Your first lattice in the GUI")
     s += bullets([
-        f"Start {c('tpms-gui')}. It opens with a gyroid sheet, 20 % solid, 2 × 2 × 2 cells of 10 mm.",
+        f"Start {c('tpms-forge-gui')}. It opens with a gyroid sheet, 20 % solid, 2 × 2 × 2 cells of 10 mm.",
         "Change the surface, thickness, shape and cells in the left panel; the preview follows in about half a "
         "second.",
         f"Type an output file name under Export ({c('.step')} or {c('.stl')}), or pick one with Browse.",
@@ -372,8 +373,8 @@ def build():
         "Press <b>Property report</b> for the volumes, areas and estimates in a window of their own.",
     ])
     s += H2("Your first lattice on the command line")
-    s.append(P(f"Without other options, {c('tpms')} writes the same default lattice:"))
-    s += code("""tpms -o lattice.step
+    s.append(P(f"Without other options, {c('tpms-forge')} writes the same default lattice:"))
+    s += code("""tpms-forge -o lattice.step
 
 Surface   : gyroid, sheet, solid part
 Level c   : 0.30973 (from target solid fraction 0.200)
@@ -389,13 +390,13 @@ Time      : 0.12 s""")
                f"the box faces are dropped, because a floating piece breaks an FEA or CFD setup "
                f"({c('--min-fragment')}, section 7.5). The exit code is 0 when everything passed, 1 when a "
                "check or a write failed, and 2 for a usage error."))
-    s.append(P(f"{c('tpms --help')} lists every option; {c('tpms --list')} lists the surface types. Section 10 "
-               f"has the full reference. The examples write {c('tpms')} for {c('build/tpms')}: add the build "
-               "folder to the PATH, or write the path."))
+    s.append(P(f"{c('tpms-forge --help')} lists every option; {c('tpms-forge --list')} lists the surface types. "
+               f"Section 10 has the full reference. The examples write {c('tpms-forge')} for "
+               f"{c('build/tpms-forge')}: add the build folder to the PATH, or write the path."))
 
     # 3 GUI
     s += H1("The desktop app")
-    s.append(picture(full("gui"), WIDTH, "tpms-gui: settings on the left, the live preview on the right"))
+    s.append(picture(full("gui"), WIDTH, "tpms-forge-gui: settings on the left, the live preview on the right"))
     s += table([
         ["Area", "What it does"],
         ["Surface", "type, form (sheet or network), part (solid or void), thickness by solid fraction or iso "
@@ -407,7 +408,7 @@ Time      : 0.12 s""")
         ["Export button", "writes the file on a worker thread; the log shows the same lines as the command line"],
         ["Property report", "computes the report and shows it in a window, with Copy, Save JSON and Save CSV; "
                             "<i>Report inputs</i> holds the optional material and flow values"],
-        ["Command line", "the equivalent tpms command, with a Copy button: repeat an export, or script it"],
+        ["Command line", "the equivalent tpms-forge command, with a Copy button: repeat an export, or script it"],
         ["Preview", "drag to orbit, right-drag to pan, wheel to zoom, double-click to reset. Axes: x red, "
                     "y green, z blue (up). The solid is gray; the fluid is blue, and a sheet's second fluid "
                     "channel red"],
@@ -416,7 +417,7 @@ Time      : 0.12 s""")
         "Numbers are typed (with − / + buttons) and kept within valid values. Options that exclude each other "
         "are greyed out; hover over an option for a short explanation.",
         "The line above the preview gives the triangle count and the solid fraction, sampled from the field.",
-        f"{c('tpms-gui')} takes the same options as {c('tpms')}: {c('tpms-gui --type diamond --density 0.3')} "
+        f"{c('tpms-forge-gui')} takes the same options as {c('tpms-forge')}: {c('tpms-forge-gui --type diamond --density 0.3')} "
         f"opens with those settings, so a copied command line opens where it left off. Add {c('--report')} to "
         "open with the report.",
     ])
@@ -467,7 +468,7 @@ Time      : 0.12 s""")
         "0.71 mm by solid fraction 0.2. The solid fraction follows from it and is printed. Smooth STEP takes "
         "several times longer this way.",
         "On bent or trimmed shapes, cells are stretched or cut, so the real solid fraction differs from R. "
-        "tpms samples the field and prints the value it gives.",
+        "TPMS Forge samples the field and prints the value it gives.",
     ])
     s += H2("Grading")
     s += bullets([
@@ -477,7 +478,7 @@ Time      : 0.12 s""")
         "radial, y around, z along the axis, around the tube, or from south to north.",
         f"{c('--cell-grade x|y|z L1')} (box) changes the cell length along that axis from {c('--cell')} at the "
         "start to L1 mm at the end; cells stretch along the axis. The box length along it is n × (L0 + L1) / 2.",
-        "Both can be combined and work with every output. tpms prints the overall solid fraction.",
+        "Both can be combined and work with every output. TPMS Forge prints the overall solid fraction.",
     ])
     s += gallery([(v["g-density"], "Solid fraction 0.1 to 0.4 along x (--density 0.1 0.4)"),
                   (v["g-cell"], "Cells from 5 to 15 mm along x (--cell 5 --cell-grade x 15)")], 2,
@@ -489,8 +490,7 @@ Time      : 0.12 s""")
     s.append(P(f"{c('--rotate AX AY AZ')} (box and trimmed shapes) turns the lattice about the origin: AX degrees "
                "about x, then AY about y, then AZ about z. Use it to print without overhangs, or to line up the "
                "lattice's stiff directions with the loads. The faces of the box then cut the cells anywhere, so "
-               "smooth STEP needs finer patch grids (seconds to a minute) and keeps exact edges: merged faces of a "
-               "rotated lattice can fail strict CAD checks."))
+               "smooth STEP needs finer patch grids (seconds to a minute)."))
     s.append(picture(v["r-rotated"], 60 * mm, "Gyroid turned 30, 20 and 10 degrees in a box (--rotate 30 20 10)"))
 
     # 5 Shapes
@@ -505,10 +505,10 @@ Time      : 0.12 s""")
         [c("sphere"), c("--radius R") + " (hollow: " + c("R0 R1") + ")", c("--cell L"), "trimmed"],
         [c("torus"), c("--radius r --major R"), c("--cell L"), "trimmed"],
     ], [0.19, 0.3, 0.3, 0.21])
-    s += code("tpms --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.step\n"
-              "tpms --shape sphere-shell --radius 15 25 --cells 1 12 5 --polar 20 160 -o shell.step\n"
-              "tpms --shape sphere --radius 15 --cell 10 -o sphere.step\n"
-              "tpms --shape sphere --radius 8 15 --cell 10 -o hollow.step")
+    s += code("tpms-forge --shape tube --radius 15 25 --height 30 --cells 1 12 3 -o tube.step\n"
+              "tpms-forge --shape sphere-shell --radius 15 25 --cells 1 12 5 --polar 20 160 -o shell.step\n"
+              "tpms-forge --shape sphere --radius 15 --cell 10 -o sphere.step\n"
+              "tpms-forge --shape sphere --radius 8 15 --cell 10 -o hollow.step")
     s += gallery([(v["s-tube"], "tube"), (v["s-torus-shell"], "torus-shell"), (v["s-sphere-shell"], "sphere-shell"),
                   (v["s-cylinder"], "cylinder"), (v["s-sphere"], "sphere"), (v["s-torus"], "torus")], 3, height=40 * mm)
     s += bullets([
@@ -538,7 +538,7 @@ Time      : 0.12 s""")
     s.append(P(f"{c('--unit-cell')} writes a periodic cell (RVE) for FEA with periodic boundary conditions:"))
     s += bullets([
         f"One cell (or {c('--cells N')} for a supercell), in a box only, without grading.",
-        "Opposite faces match exactly: point for point and edge for edge. tpms checks the mesh points on each "
+        "Opposite faces match exactly: point for point and edge for edge. TPMS Forge checks the mesh points on each "
         "pair of faces and fails if they differ.",
         f"Exact edges and every piece kept ({c('--exact')} and {c('--min-fragment 0')} are implied): a small piece "
         "at a corner continues in the next cell.",
@@ -552,7 +552,7 @@ Time      : 0.12 s""")
         f"{c('--buffers x|y|z L [L1]')} (void): empty zones L mm long before and after the lattice, fused with "
         "the fluid, so the flow can develop: inlet and outlet regions for CFD. A sheet's two channels meet in "
         "a buffer, so the fluid is one solid.",
-        "The slabs lie outside the lattice box, which keeps its size. Solid fractions printed by tpms and the "
+        "The slabs lie outside the lattice box, which keeps its size. Solid fractions printed by TPMS Forge and the "
         "report are of the lattice box.",
     ])
     s += gallery([(v["p-plates"], "--plates z 1.5"), (v["p-buffers"], "--part void --buffers x 10")], 2,
@@ -573,8 +573,8 @@ Time      : 0.12 s""")
     ])
     s += gallery([(v["hx-void"], "Fluids: channel A (blue) along x, B (red) along y"),
                   (v["hx-solid"], "Solid: the lattice with its four header plates")], 2, height=58 * mm)
-    s += code("tpms --part void --channel-buffers x y 10 1 -o hx_fluid.step   # hx_fluid_A.step and _B.step\n"
-              "tpms --channel-buffers x y 10 1 -o hx_solid.step")
+    s += code("tpms-forge --part void --channel-buffers x y 10 1 -o hx_fluid.step   # hx_fluid_A.step and _B.step\n"
+              "tpms-forge --channel-buffers x y 10 1 -o hx_solid.step")
     s += note("Ports and walls are named: channel A's buffer ends are its inlet and outlet (x- and x+ here), the "
               "plates and hole walls are <i>wall A</i> or <i>wall B</i> after the channel they face. The two "
               "faces across the third axis (z- and z+ here) stay open cut faces: set them as walls, symmetry or "
@@ -598,7 +598,7 @@ Time      : 0.12 s""")
     s += bullets([
         f"{c('--tol T')}: the largest distance in mm between a face and the exact surface. Default: 0.001 × the "
         "smallest cell edge (0.01 mm for 10 mm cells).",
-        f"{c('--patches N')}: the patch grid per cell edge to start from (default 3). If a check fails, tpms tries "
+        f"{c('--patches N')}: the patch grid per cell edge to start from (default 3). If a check fails, TPMS Forge tries "
         "finer grids by itself and prints the one it used; an ungraded lattice is tried on a single cell "
         "first, which is fast.",
         f"{c('--exact')}: one face per patch with exactly shared edges. Without it, merged faces have edges within "
@@ -627,7 +627,7 @@ Time      : 0.12 s""")
                "file name for it."))
     s += H2("Meshes: STL and faceted STEP")
     s.append(P(f"{c('--res N')} sets the grid steps per cell edge (default 24). The triangle count grows with N²; "
-               "thin sheets need a higher N. tpms warns when the solid fraction of the mesh is more than 5 % away "
+               "thin sheets need a higher N. TPMS Forge warns when the solid fraction of the mesh is more than 5 % away "
                "from the field's, which usually means walls thinner than the grid."))
     s += H2("Size and speed")
     s += bullets([
@@ -647,7 +647,7 @@ Time      : 0.12 s""")
     s.append(P(f"{c('--report')} prints the properties of the solid and the fluid, whatever {c('--part')} exports. "
                f"An output ending in {c('.json')} or {c('.csv')} writes the report as a file; the GUI shows it in "
                "a window."))
-    s.append(picture(report_window("report"), WIDTH * 0.8, "The property report window in tpms-gui"))
+    s.append(picture(report_window("report"), WIDTH * 0.8, "The property report window in tpms-forge-gui"))
     s += table([
         ["Value", "Meaning"],
         ["Solid / fluid volume", "mm³, with solid fraction and porosity"],
@@ -688,9 +688,9 @@ Time      : 0.12 s""")
                f"listed or given as {c('FROM:TO:STEP')}. Each run's files get the value in their name, and a "
                f"{c('.csv')} output collects the reports in one table, one line per run, with the value first. In "
                "the GUI, <i>Sweep</i> under Export does the same."))
-    s += code("""tpms --sweep --density 0.1:0.3:0.05 --flow 0.1 -o gyroid.step -o results.csv
+    s += code("""tpms-forge --sweep --density 0.1:0.3:0.05 --flow 0.1 -o gyroid.step -o results.csv
     # gyroid_density-0.1.step ... gyroid_density-0.3.step, and results.csv
-tpms --sweep --type gyroid diamond schwarz-p --wall 0.5 -o results.csv""")
+tpms-forge --sweep --type gyroid diamond schwarz-p --wall 0.5 -o results.csv""")
 
     # 9 Workflows
     s += H1("Workflows")
@@ -702,7 +702,7 @@ tpms --sweep --type gyroid diamond schwarz-p --wall 0.5 -o results.csv""")
         f"faces ({c('z-')}, {c('z+')}), and {c('wall')} faces for pressure.",
         "Check with the report that the solid connects the loaded faces (<i>Connects</i>).",
     ])
-    s += code("tpms --type gyroid --density 0.25 --cell 8 --cells 5 5 2 --plates z 1.5 -o panel.step")
+    s += code("tpms-forge --type gyroid --density 0.25 --cell 8 --cells 5 5 2 --plates z 1.5 -o panel.step")
     s += H2("CFD through a lattice")
     s += bullets([
         f"Export the fluid with {c('--part void')} and inlet and outlet buffers along the flow: {c('--buffers x 10')}.",
@@ -710,26 +710,26 @@ tpms --sweep --type gyroid diamond schwarz-p --wall 0.5 -o results.csv""")
         "The report gives D<sub>h</sub>, porosity, permeability and, with --flow, a first pressure drop estimate "
         "to compare with.",
     ])
-    s += code("tpms --part void --buffers x 10 --cells 4 2 2 -o fluid.step --flow 0.2 --report")
+    s += code("tpms-forge --part void --buffers x 10 --cells 4 2 2 -o fluid.step --flow 0.2 --report")
     s += H2("Two-fluid heat exchanger (conjugate heat transfer)")
     s += bullets([
         "Write the solid and both fluids with the same lattice options and channel buffers (three files).",
         "Import all three; they touch exactly, so the CFD tool can couple their shared faces as interfaces.",
         "Inlets and outlets are the buffer ends: x- and x+ for channel A along x, y- and y+ for B along y.",
     ])
-    s += code("""tpms --cells 4 4 2 --part void --channel-buffers x y 10 1 -o hx_fluid.step
-tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
+    s += code("""tpms-forge --cells 4 4 2 --part void --channel-buffers x y 10 1 -o hx_fluid.step
+tpms-forge --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
     s += H2("Effective properties from a unit cell")
     s += bullets([
         f"Export one cell with {c('--unit-cell')}; its opposite faces match, so periodic boundary conditions "
         "apply directly.",
         f"Check it with {c('python tools/check_step.py --periodic cell.step')} (section 11.2).",
     ])
-    s += code("tpms --unit-cell --type diamond --density 0.3 --cell 8 -o cell.step")
+    s += code("tpms-forge --unit-cell --type diamond --density 0.3 --cell 8 -o cell.step")
     s += H2("3D printing")
     s.append(P(f"Write STL. Raise {c('--res')} for thin walls or large cells; the warning about the solid fraction "
                "tells you when the grid is too coarse."))
-    s += code("tpms --density 0.15 --cell 6 --cells 6 --res 32 -o print.stl")
+    s += code("tpms-forge --density 0.15 --cell 6 --cells 6 --res 32 -o print.stl")
     s += H2("Importing into CAD")
     s += bullets([
         "STEP files are AP214, in mm, with one solid per piece (and names). Import them as solids, not as "
@@ -743,7 +743,7 @@ tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
 
     # 10 Reference
     s += H1("Command-line reference")
-    s.append(P(f"Usage: {c('tpms [options] -o FILE [-o FILE ...]')}. {c('tpms-gui')} takes the same options and "
+    s.append(P(f"Usage: {c('tpms-forge [options] -o FILE [-o FILE ...]')}. {c('tpms-forge-gui')} takes the same options and "
                "opens with them."))
 
     def ref(title, rows):
@@ -804,7 +804,7 @@ tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
     s += H1("Checks and troubleshooting")
     s.append(P("Every smooth STEP is checked before it is written: each edge is shared by exactly two faces in "
                "opposite directions (closed solids), every corner lies on the surface, the faces are within "
-               "--tol of the exact surface, and the enclosed volume matches the field. If a check fails, tpms "
+               "--tol of the exact surface, and the enclosed volume matches the field. If a check fails, TPMS Forge "
                "tries finer patch grids by itself; it reports an error only when the finest one fails too. Mesh "
                "outputs are checked for closed solids."))
     s += table([
@@ -818,16 +818,13 @@ tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
         ["warning: mesh not closed", "try another --res"],
         ["note: a fluid solid lies in both channels", "the two fluid channels meet (buffers join them, or a sheet "
          "is thinner than the grid), so they stay in one file"],
-        ["error: (usage)", "the message names the option; tpms refuses conflicting options instead of guessing"],
+        ["error: (usage)", "the message names the option; TPMS Forge refuses conflicting options instead of guessing"],
     ], [0.42, 0.58])
     s += H2("Known limits")
     s += bullets([
         "The surfaces are level-set approximations of the minimal surfaces, and sheet walls are not exactly "
         "constant in thickness.",
-        "Merged Neovius sheets on tubes and torus shells can be read as invalid; use --exact for those.",
         "A sphere shell stays open around its poles; --wall makes smooth STEP slower.",
-        "Merged faces on trimmed spheres can fail strict CAD checks (use --exact then); a rotated lattice always "
-        "keeps exact edges, so its files have more faces.",
         "Large lattices give large files: face count grows with the number of cells.",
         "Plates and buffers work on one axis of a box; channel buffers need a box and a sheet; grading is "
         "linear along one axis.",
@@ -847,7 +844,7 @@ tpms --cells 4 4 2 --channel-buffers x y 10 1 -o hx_solid.step""")
     s.append(P(f"With this environment in the project folder, {c('ctest')} also reads every test file back with "
                "OpenCASCADE."))
     s.append(Spacer(1, 10))
-    s.append(P('<font color="#5A6B7C">tpms is open source under the MIT license.</font>'))
+    s.append(P('<font color="#5A6B7C">TPMS Forge is open source under the MIT license.</font>'))
 
     doc = Guide(OUT)
     doc.multiBuild(s)

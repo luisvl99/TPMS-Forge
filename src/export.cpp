@@ -176,7 +176,7 @@ bool writeStepFile(const std::string& path, const std::string& name,
     std::fprintf(f,
                  "ISO-10303-21;\nHEADER;\n"
                  "FILE_DESCRIPTION(('TPMS lattice'),'2;1');\n"
-                 "FILE_NAME(%s,'%s',(''),(''),'tpms','tpms','');\n"
+                 "FILE_NAME(%s,'%s',(''),(''),'TPMS Forge','TPMS Forge','');\n"
                  "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\n"
                  "ENDSEC;\nDATA;\n",
                  q.c_str(), stamp);

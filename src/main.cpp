@@ -8,6 +8,6 @@ int main(int argc, char** argv) {
         std::fputs(text.c_str(), f);
         std::fputc('\n', f);
     });
-    if (rc == 2) std::fputs("Run 'tpms --help' for usage.\n", stderr);
+    if (rc == 2) std::fputs("Run 'tpms-forge --help' for usage.\n", stderr);
     return rc;
 }

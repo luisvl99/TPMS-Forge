@@ -1,5 +1,5 @@
-// tpms-gui: every tpms option as a widget, a live 3D preview, and export on
-// a worker thread. The GUI builds a tpms command line and runs it through the
+// tpms-forge-gui: every tpms-forge option as a widget, a live 3D preview, and export on
+// a worker thread. The GUI builds a tpms-forge command line and runs it through the
 // same run() as the CLI, so both always offer the same options.
 
 #ifdef _WIN32
@@ -194,7 +194,7 @@ std::vector<std::string> reportArgs(const Settings& s) {
 }
 
 std::string commandLine(const std::vector<std::string>& args) {
-    std::string c = "tpms";
+    std::string c = "tpms-forge";
     for (const auto& a : args) c += a.find(' ') == std::string::npos ? " " + a : " \"" + a + "\"";
     return c;
 }
@@ -601,7 +601,7 @@ void savePpm(const char* path, int w, int h) {
     }
 }
 
-// Settings from tpms options, so `tpms-gui [tpms options]` opens with a
+// Settings from tpms-forge options, so `tpms-forge-gui [tpms-forge options]` opens with a
 // copied command line filled in.
 Settings fromOptions(const Options& o) {
     Settings s;
@@ -625,7 +625,6 @@ Settings fromOptions(const Options& o) {
     for (int k = 0; k < 2; ++k) s.material[k] = float(o.material[k]);
     for (int k = 0; k < 3; ++k) s.flow[k] = float(o.flow[k]);
     if (o.unitCell) s.exact = false, s.minFragment = 0.01f;  // implied by the unit cell, not chosen
-    if (o.rotate[0] || o.rotate[1] || o.rotate[2]) s.exact = false;  // implied by the rotation
     for (int a = 0; a < 3; ++a) s.shift[a] = float(o.shift[a]), s.rotate[a] = float(o.rotate[a]);
     for (int a = 0; a < 3; ++a) s.cell[a] = float(o.cell[a]), s.cells[a] = o.cells[a];
     s.cubic = o.cell[0] == o.cell[1] && o.cell[1] == o.cell[2];
@@ -656,7 +655,7 @@ int main(int argc, char** argv) {
 
     if (!glfwInit()) return 1;
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
-    GLFWwindow* window = glfwCreateWindow(1400, 860, "TPMS lattice", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1400, 860, "TPMS Forge", nullptr, nullptr);
     if (!window) return 1;
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
@@ -724,7 +723,7 @@ int main(int argc, char** argv) {
             std::snprintf(b, sizeof b, rc == 0 ? "Done in %.1f s." : "Failed after %.1f s: see the log.", secs);
             status = b;
         }
-        if (startOptions.report) {  // `tpms-gui ... --report` opens with the report
+        if (startOptions.report) {  // `tpms-forge-gui ... --report` opens with the report
             startOptions.report = false;
             reportJob = std::async(std::launch::async, buildReport, reportArgs(s));
         }
@@ -743,7 +742,7 @@ int main(int argc, char** argv) {
         const float panelW = 380 * scale;
         ImGui::SetNextWindowPos({0, 0});
         ImGui::SetNextWindowSize({panelW, io.DisplaySize.y});
-        ImGui::Begin("TPMS lattice", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+        ImGui::Begin("TPMS Forge", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                                                   ImGuiWindowFlags_NoCollapse);
         ImGui::PushItemWidth(-140 * scale);
 
@@ -755,7 +754,7 @@ int main(int argc, char** argv) {
         if (s.form) s.thickness = std::min(s.thickness, 1);  // a wall thickness is for sheets
         ImGui::Combo("Thickness by", &s.thickness,
                      s.form ? "Solid fraction\0Iso level c\0" : "Solid fraction\0Iso level c\0Wall thickness (mm)\0");
-        // Numbers are typed, with +/- steps; values are clamped to what tpms accepts.
+        // Numbers are typed, with +/- steps; values are clamped to what tpms-forge accepts.
         if (s.thickness == 0) ImGui::InputFloat("Solid fraction", &s.density, 0.01f, 0.05f, "%.3f");
         else if (s.thickness == 1) ImGui::InputFloat("Iso level c", &s.level, 0.01f, 0.1f, "%.4f");
         else ImGui::InputFloat("Wall thickness (mm)", &s.wall, 0.05f, 0.2f, "%.3f");
@@ -931,11 +930,9 @@ int main(int argc, char** argv) {
                 ImGui::InputInt("Start patches per cell", &s.patches);
                 ImGui::InputFloat("Tolerance (mm)", &s.tol, 0, 0, s.tol > 0 ? "%.4f" : "%.0f (auto)");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = auto: 0.001 x the smallest cell edge.");
-                // A unit cell and a rotated lattice always have exact edges.
-                const bool rotated = s.rotate[0] || s.rotate[1] || s.rotate[2];
-                const bool forced = unitCell || (rotated && (s.shape == kBox || !bentShape(s.shape)) && !s.cellGraded);
-                bool exact = s.exact || forced;
-                ImGui::BeginDisabled(forced);
+                // A unit cell always has exact edges.
+                bool exact = s.exact || unitCell;
+                ImGui::BeginDisabled(unitCell);
                 if (ImGui::Checkbox("Exact edges (more faces)", &exact)) s.exact = exact;
                 ImGui::EndDisabled();
             }
@@ -954,7 +951,7 @@ int main(int argc, char** argv) {
 
         const std::vector<std::string> args = exportArgs(s);
         const bool exporting = exportJob.valid();
-        // Export and the property report run the same way: a tpms command
+        // Export and the property report run the same way: a tpms-forge command
         // on a worker thread, with its output in the log.
         auto start = [&](const std::vector<std::string>& job) {
             {

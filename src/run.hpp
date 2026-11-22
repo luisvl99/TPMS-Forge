@@ -1,5 +1,5 @@
 #pragma once
-// The tpms command line as a function, shared by the CLI and the GUI.
+// The tpms-forge command line as a function, shared by the CLI and the GUI.
 
 #include "mesher.hpp"
 #include "tpms.hpp"
@@ -128,7 +128,7 @@ struct Pieces {
 };
 Pieces keepPieces(const Mesh& mesh, double minFragment);
 
-// Runs a tpms command line. Returns the exit code: 0 ok, 1 a check or write
+// Runs a tpms-forge command line. Returns the exit code: 0 ok, 1 a check or write
 // failed, 2 usage error.
 int run(const std::vector<std::string>& args, const Print& print);
 
